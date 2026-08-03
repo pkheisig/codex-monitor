@@ -1,0 +1,12 @@
+.build/
+.swiftpm/
+DerivedData/
+
+# macOS and editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Local logs and scratch files
+*.log
+*.tmp
