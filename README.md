@@ -77,6 +77,8 @@ by total tokens or API-equivalent cost. The overview also shows a cache
 breakdown with uncached input, cached input, cache writes, output, and the
 corresponding API-equivalent cost for each priced model. The menu-bar display
 can be switched between today's combined total tokens and API-equivalent cost.
+The status item is text-only and appends the weekly quota remaining, for example
+`$9.99 | 31%` or `221.6M | 31%`.
 JSON has a
 stable top-level schema with `date`, `timezone`, `range`, `start_at`, `end_at`,
 `generated_at`, `advisor`, `worker`, `combined`, `other`, `model_usage`, and

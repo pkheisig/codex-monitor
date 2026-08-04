@@ -1073,14 +1073,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     private func configureStatusButton() {
         guard let button = statusItem.button else { return }
-        let image = NSImage(
-            systemSymbolName: "chart.bar.fill",
-            accessibilityDescription: "Codex Monitor"
-        )
-        image?.isTemplate = true
-        button.image = image
-        button.imagePosition = .imageLeft
-        button.imageScaling = .scaleProportionallyDown
+        // Keep the status item text-only: the selected usage metric and the
+        // remaining weekly limit are more useful than a decorative icon.
+        button.image = nil
         button.title = statusLabel
         button.target = self
         button.action = #selector(togglePopover(_:))
@@ -1245,12 +1240,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     fileprivate var statusLabel: String {
+        let usage: String
         switch statusMetric {
         case .totalTokens:
-            return todayReport.combined.compactTokenCount
+            usage = todayReport.combined.compactTokenCount
         case .apiCost:
-            return money(todayReport.combined.apiEquivalentCostUSD)
+            usage = money(todayReport.combined.apiEquivalentCostUSD)
         }
+
+        let weeklyLimit = quota?.weekly.flatMap { window in
+            guard window.usageKnown else { return nil }
+            return String(Int(window.remainingPercent.rounded())) + "%"
+        } ?? "—"
+        return usage + " | " + weeklyLimit
     }
 
     private func money(_ value: Double?) -> String {
