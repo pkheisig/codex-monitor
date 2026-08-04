@@ -103,6 +103,28 @@ final class UsageCollectorTests: XCTestCase {
         XCTAssertEqual(report.combined.apiEquivalentCostUSD ?? -1, advisorCost + workerCost, accuracy: 0.0000000001)
     }
 
+    func testCostBreakdownSeparatesUncachedCachedAndWriteInput() {
+        let totals = LaneTotals(
+            inputTokens: 50,
+            cachedInputTokens: 10,
+            cacheWriteInputTokens: 5,
+            outputTokens: 7
+        )
+
+        let breakdown = SolUsagePricing.breakdown(for: totals, model: "gpt-5.6-luna")
+
+        XCTAssertEqual(breakdown?.uncachedInputTokens, 35)
+        XCTAssertEqual(breakdown?.cachedInputTokens, 10)
+        XCTAssertEqual(breakdown?.cacheWriteInputTokens, 5)
+        XCTAssertEqual(breakdown?.outputTokens, 7)
+        XCTAssertEqual(breakdown?.uncachedInputCostUSD ?? -1, 35 * 0.20 / 1_000_000, accuracy: 0.0000000001)
+        XCTAssertEqual(breakdown?.cachedInputCostUSD ?? -1, 10 * 0.02 / 1_000_000, accuracy: 0.0000000001)
+        XCTAssertEqual(breakdown?.cacheWriteCostUSD ?? -1, 5 * 0.25 / 1_000_000, accuracy: 0.0000000001)
+        XCTAssertEqual(breakdown?.outputCostUSD ?? -1, 7 * 1.20 / 1_000_000, accuracy: 0.0000000001)
+        let expectedCost = (35 * 0.20 + 10 * 0.02 + 5 * 0.25 + 7 * 1.20) / 1_000_000
+        XCTAssertEqual(breakdown?.totalCostUSD ?? -1, expectedCost, accuracy: 0.0000000001)
+    }
+
     func testHugeIrrelevantLineIsRejectedBeforeJSONDecoding() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("sol-usage-filter-\(UUID().uuidString)", isDirectory: true)
@@ -168,6 +190,7 @@ final class UsageCollectorTests: XCTestCase {
 
         XCTAssertEqual(store.dates(), ["2026-08-03", "2026-08-01"])
         XCTAssertEqual(store.report(for: "2026-08-01"), first)
+        XCTAssertEqual(store.reports().map(\.date), ["2026-08-01", "2026-08-03"])
     }
 
     private func fixtureFile(named name: String) throws -> URL {
