@@ -50,7 +50,9 @@ rollout history in the repository or app bundle. A cached quota snapshot is
 accepted only when its account id matches the currently active Codex session,
 so switching accounts on the same Mac cannot reuse the previous account's
 limits. Local quota and daily-history files stay under that user's
-`~/Library/Application Support/SolUsageMonitor/` and are never uploaded.
+`~/Library/Application Support/SolUsageMonitor/`, are owner-only (`0700`/
+`0600`), and are never uploaded. When the active account changes, the monitor
+clears the previous account's quota from the panel before showing new data.
 
 ## CLI
 

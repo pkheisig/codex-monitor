@@ -1101,6 +1101,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     private func requestRefresh() {
         let now = Date()
+        let activeAccountID = CodexQuotaFetcher.localAccountID()
         let collector = self.collector
         let history = self.historyStore
         let quotaFetcher = self.quotaFetcher
@@ -1130,7 +1131,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                         savedDates: dates,
                         savedReports: reports,
                         quota: freshQuota,
-                        quotaError: quotaError)
+                        quotaError: quotaError,
+                        activeAccountID: activeAccountID)
                 }
             }
         }
@@ -1141,13 +1143,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         savedDates: [String],
         savedReports: [UsageReport],
         quota: CodexQuotaSnapshot?,
-        quotaError: String?)
+        quotaError: String?,
+        activeAccountID: String?)
     {
+        // An account switch can happen while the monitor is running. Never
+        // leave the previous account's cached limits visible while the new
+        // session is offline or the first refresh is still in flight.
+        if let quota, let activeAccountID, quota.accountID == activeAccountID {
+            self.quota = quota
+        } else if activeAccountID == nil || self.quota?.accountID != activeAccountID {
+            self.quota = nil
+        }
         let oldToday = SolUsageDates.today()
         let wasViewingToday = selectedDate == oldToday
-        if let quota {
-            self.quota = quota
-        }
         self.quotaError = quotaError
         todayReport = next
         self.savedReports = normalizedReports(savedReports, including: next)

@@ -137,6 +137,7 @@ public final class CodexQuotaStore: @unchecked Sendable {
             .appendingPathComponent("Application Support", isDirectory: true)
             .appendingPathComponent("SolUsageMonitor", isDirectory: true)
         self.fileURL = support.appendingPathComponent("codex-quota.json")
+        protectLocalStorage()
     }
 
     public func load() -> CodexQuotaSnapshot? {
@@ -153,10 +154,27 @@ public final class CodexQuotaStore: @unchecked Sendable {
         do {
             try fileManager.createDirectory(
                 at: fileURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true)
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: fileURL.deletingLastPathComponent().path)
             try data.write(to: fileURL, options: .atomic)
+            try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
         } catch {
             // Quota persistence is supplemental; a failed write must not stop monitoring.
+        }
+    }
+
+    private func protectLocalStorage() {
+        let directory = fileURL.deletingLastPathComponent()
+        try? fileManager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        if fileManager.fileExists(atPath: fileURL.path) {
+            try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
         }
     }
 }

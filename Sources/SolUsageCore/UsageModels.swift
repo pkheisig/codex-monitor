@@ -483,6 +483,7 @@ public final class DailyHistoryStore: @unchecked Sendable {
             .appendingPathComponent("Application Support", isDirectory: true)
             .appendingPathComponent("SolUsageMonitor", isDirectory: true)
         self.fileURL = support.appendingPathComponent("daily-history.json")
+        protectLocalStorage()
     }
 
     public func report(for date: String) -> UsageReport? {
@@ -503,12 +504,29 @@ public final class DailyHistoryStore: @unchecked Sendable {
         do {
             try fileManager.createDirectory(
                 at: fileURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
             )
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: fileURL.deletingLastPathComponent().path)
             let data = try JSONEncoder.history.encode(reports)
             try data.write(to: fileURL, options: .atomic)
+            try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
         } catch {
             // History is supplemental; a failed snapshot must not stop monitoring.
+        }
+    }
+
+    private func protectLocalStorage() {
+        let directory = fileURL.deletingLastPathComponent()
+        try? fileManager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        if fileManager.fileExists(atPath: fileURL.path) {
+            try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
         }
     }
 
