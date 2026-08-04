@@ -962,6 +962,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let date = SolUsageDates.today(now: now)
         let history = DailyHistoryStore()
         let quotaStore = CodexQuotaStore()
+        let localAccountID = CodexQuotaFetcher.localAccountID()
         let start = SolUsageDates.startOfDay(for: date) ?? now
         let empty = UsageReport(
             date: date,
@@ -983,7 +984,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         todayReport = initial
         savedReports = history.reports()
         availableDates = history.dates()
-        quota = quotaStore.load()
+        // Never show a cached account's limits before the active Codex auth
+        // has been identified. This prevents a second account on the same Mac
+        // from briefly seeing the previous account's quota.
+        quota = quotaStore.load().flatMap { cached in
+            guard let localAccountID,
+                  let cachedAccountID = cached.accountID,
+                  cachedAccountID == localAccountID
+            else { return nil }
+            return cached
+        }
         quotaError = nil
         selectedDate = date
         selectedView = MonitorView(

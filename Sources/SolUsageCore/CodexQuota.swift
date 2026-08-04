@@ -86,6 +86,10 @@ public struct CodexQuotaPace: Equatable, Sendable {
 }
 
 public struct CodexQuotaSnapshot: Codable, Equatable, Sendable {
+    /// Stable Codex account identifier from the authenticated response. It is
+    /// stored only in the local snapshot so a switched account never displays
+    /// the previous account's cached limits.
+    public let accountID: String?
     public let accountEmail: String?
     public let plan: String?
     public let windows: [CodexQuotaWindow]
@@ -94,6 +98,7 @@ public struct CodexQuotaSnapshot: Codable, Equatable, Sendable {
     public let fetchedAt: Date
 
     public init(
+        accountID: String? = nil,
         accountEmail: String?,
         plan: String?,
         windows: [CodexQuotaWindow],
@@ -101,6 +106,7 @@ public struct CodexQuotaSnapshot: Codable, Equatable, Sendable {
         creditsRemaining: Double?,
         fetchedAt: Date)
     {
+        self.accountID = accountID
         self.accountEmail = accountEmail
         self.plan = plan
         self.windows = windows
@@ -186,6 +192,15 @@ public enum CodexQuotaFetchError: LocalizedError, Sendable {
 public struct CodexQuotaFetcher: Sendable {
     public init() {}
 
+    /// Returns only the non-secret account id from the local auth file. This
+    /// lets the app validate a cached snapshot after an account switch; the
+    /// access token is never returned or persisted here.
+    public static func localAccountID(
+        environment: [String: String] = ProcessInfo.processInfo.environment) -> String?
+    {
+        try? Self.loadCredentials(environment: environment).accountID
+    }
+
     public func fetch(now: Date = Date()) async throws -> CodexQuotaSnapshot {
         let credentials = try Self.loadCredentials()
         var request = URLRequest(
@@ -227,7 +242,7 @@ public struct CodexQuotaFetcher: Sendable {
         } catch {
             throw CodexQuotaFetchError.invalidResponse
         }
-        return payload.snapshot(now: now)
+        return payload.snapshot(now: now, accountID: credentials.accountID)
     }
 
     /// Pure parser hook used by tests and by future offline fixture support.
@@ -293,6 +308,7 @@ private struct UsagePayload: Decodable, Sendable {
     let credits: CreditPayload?
 
     enum CodingKeys: String, CodingKey {
+        case accountID = "account_id"
         case planType = "plan_type"
         case email
         case rateLimit = "rate_limit"
@@ -301,7 +317,9 @@ private struct UsagePayload: Decodable, Sendable {
         case credits
     }
 
-    func snapshot(now: Date) -> CodexQuotaSnapshot {
+    let accountID: String?
+
+    func snapshot(now: Date, accountID: String? = nil) -> CodexQuotaSnapshot {
         var windows: [CodexQuotaWindow] = []
         if let primary = rateLimit?.primaryWindow {
             let weekly = primary.windowSeconds >= 6 * 24 * 60 * 60
@@ -343,6 +361,7 @@ private struct UsagePayload: Decodable, Sendable {
             title: "Code review")
 
         return CodexQuotaSnapshot(
+            accountID: accountID ?? self.accountID,
             accountEmail: email?.trimmingCharacters(in: .whitespacesAndNewlines),
             plan: planType?.trimmingCharacters(in: .whitespacesAndNewlines),
             windows: deduplicate(windows),

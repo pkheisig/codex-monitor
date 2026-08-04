@@ -6,8 +6,16 @@ import CoreFoundation
 /// intentionally a simple, read-only collector: the menu app and CLI reparse
 /// today's eligible files on their 30-second refresh cadence.
 public final class UsageCollector: @unchecked Sendable {
-    public static func defaultDataRoots(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [SolUsageDataRoot] {
-        let codex = home.appendingPathComponent(".codex", isDirectory: true)
+    public static func defaultDataRoots(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        environment: [String: String] = ProcessInfo.processInfo.environment) -> [SolUsageDataRoot]
+    {
+        let codex: URL
+        if let configuredHome = environment["CODEX_HOME"], !configuredHome.isEmpty {
+            codex = URL(fileURLWithPath: (configuredHome as NSString).expandingTildeInPath, isDirectory: true)
+        } else {
+            codex = home.appendingPathComponent(".codex", isDirectory: true)
+        }
         return [
             SolUsageDataRoot(url: codex.appendingPathComponent("sessions", isDirectory: true), recursive: true),
             SolUsageDataRoot(url: codex.appendingPathComponent("archived_sessions", isDirectory: true), recursive: false)

@@ -40,6 +40,18 @@ and credits when the account endpoint provides them. A cached quota snapshot is
 shown when a later refresh cannot reach the endpoint. The app bundle includes a
 custom Codex Monitor icon.
 
+## Account and privacy behavior
+
+Codex Monitor is account-neutral. It reads the active user's local Codex
+`auth.json` on each refresh, honors `CODEX_HOME` when set, and sends the
+current user's access token only as an HTTPS Bearer request to the Codex usage
+endpoint. It does not contain a token, cookie, account id, email address, or
+rollout history in the repository or app bundle. A cached quota snapshot is
+accepted only when its account id matches the currently active Codex session,
+so switching accounts on the same Mac cannot reuse the previous account's
+limits. Local quota and daily-history files stay under that user's
+`~/Library/Application Support/SolUsageMonitor/` and are never uploaded.
+
 ## CLI
 
 ```sh

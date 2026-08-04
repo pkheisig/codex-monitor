@@ -201,6 +201,7 @@ final class UsageCollectorTests: XCTestCase {
         let reset = Int(now.timeIntervalSince1970) + 3 * 24 * 60 * 60 + 12 * 60 * 60
         let payload = """
         {
+          "account_id": "account-a",
           "plan_type": "pro",
           "email": "user@example.com",
           "rate_limit": {
@@ -228,6 +229,7 @@ final class UsageCollectorTests: XCTestCase {
 
         let snapshot = try CodexQuotaFetcher.parse(Data(payload.utf8), now: now)
 
+        XCTAssertEqual(snapshot.accountID, "account-a")
         XCTAssertEqual(snapshot.accountEmail, "user@example.com")
         XCTAssertEqual(snapshot.plan, "pro")
         XCTAssertEqual(snapshot.weekly?.title, "Weekly")
@@ -237,6 +239,39 @@ final class UsageCollectorTests: XCTestCase {
         XCTAssertEqual(snapshot.creditsRemaining ?? -1, 4492.03, accuracy: 0.001)
         XCTAssertEqual(snapshot.weekly?.pace(now: now)?.deficitPercent ?? -1, 18, accuracy: 0.001)
         XCTAssertNotNil(snapshot.weekly?.pace(now: now)?.runsOutIn)
+    }
+
+    func testCodexAccountLookupUsesConfiguredCodexHomeWithoutExposingToken() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-monitor-auth-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let auth = """
+        {
+          "tokens": {
+            "access_token": "local-test-token",
+            "account_id": "account-b"
+          }
+        }
+        """
+        try Data(auth.utf8).write(to: home.appendingPathComponent("auth.json"))
+
+        let accountID = CodexQuotaFetcher.localAccountID(environment: ["CODEX_HOME": home.path])
+        XCTAssertEqual(accountID, "account-b")
+        XCTAssertNotEqual(accountID, "local-test-token")
+    }
+
+    func testDefaultUsageRootsHonorConfiguredCodexHome() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-monitor-root-\(UUID().uuidString)", isDirectory: true)
+        let roots = UsageCollector.defaultDataRoots(
+            home: URL(fileURLWithPath: "/unused"),
+            environment: ["CODEX_HOME": home.path])
+
+        XCTAssertEqual(roots.map(\.url.path), [
+            home.appendingPathComponent("sessions").path,
+            home.appendingPathComponent("archived_sessions").path
+        ])
     }
 
     func testDailyHistoryStoresOnlyDerivedReportsAndSortsDays() throws {

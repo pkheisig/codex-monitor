@@ -10,3 +10,14 @@ DerivedData/
 # Local logs and scratch files
 *.log
 *.tmp
+
+# Never commit Codex account material or monitor state
+.codex/
+**/auth.json
+.env
+.env.*
+**/daily-history.json
+**/codex-quota.json
+*.pem
+*.key
+*.p12
