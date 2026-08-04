@@ -7,6 +7,7 @@ private let allSelection = "__all__"
 private enum MonitorView: String, CaseIterable, Identifiable {
     case overview
     case ranking
+    case trend
 
     var id: String { rawValue }
 
@@ -14,11 +15,26 @@ private enum MonitorView: String, CaseIterable, Identifiable {
         switch self {
         case .overview: return "Overview"
         case .ranking: return "Ranking"
+        case .trend: return "Trend"
         }
     }
 }
 
 private enum RankingSort: String, CaseIterable, Identifiable {
+    case totalTokens
+    case apiCost
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .totalTokens: return "Total tokens"
+        case .apiCost: return "API cost"
+        }
+    }
+}
+
+private enum UsageMetric: String, CaseIterable, Identifiable {
     case totalTokens
     case apiCost
 
@@ -44,17 +60,22 @@ private func displayModelName(_ model: String) -> String {
 @MainActor
 private struct UsagePopoverView: View {
     let report: UsageReport
+    let savedReports: [UsageReport]
     let dates: [String]
     let selectedDate: String
     let selectedModel: String
     let selectedIntelligence: String
     let selectedView: MonitorView
     let rankingSort: RankingSort
+    let statusMetric: UsageMetric
+    let trendMetric: UsageMetric
     let onDateChange: (String) -> Void
     let onModelChange: (String) -> Void
     let onIntelligenceChange: (String) -> Void
     let onViewChange: (MonitorView) -> Void
     let onRankingSortChange: (RankingSort) -> Void
+    let onStatusMetricChange: (UsageMetric) -> Void
+    let onTrendMetricChange: (UsageMetric) -> Void
     let onRefresh: () -> Void
     let onQuit: () -> Void
 
@@ -89,6 +110,44 @@ private struct UsagePopoverView: View {
         let model = selectedModel == allSelection ? "All models" : modelLabel(selectedModel)
         let intelligence = selectedIntelligence == allSelection ? "all intelligence" : selectedIntelligence
         return "\(model) · \(intelligence)"
+    }
+
+    private var cacheBreakdownLines: [CacheBreakdownLine] {
+        if !filteredModelUsage.isEmpty {
+            let lines: [CacheBreakdownLine] = filteredModelUsage.compactMap { usage in
+                guard let breakdown = SolUsagePricing.breakdown(for: usage.totals, model: usage.key.model) else {
+                    return nil
+                }
+                return CacheBreakdownLine(
+                    id: usage.key.id,
+                    label: "\(displayModelName(usage.key.model)) · \(usage.key.intelligence)",
+                    breakdown: breakdown
+                )
+            }
+            if !lines.isEmpty { return lines }
+        }
+
+        if selectedModel != allSelection,
+           let breakdown = SolUsagePricing.breakdown(for: selectedTotals, model: selectedModel),
+           !breakdownIsEmpty(breakdown) {
+            return [CacheBreakdownLine(
+                id: selectedModel,
+                label: selectionSummary,
+                breakdown: breakdown
+            )]
+        }
+
+        if selectedModel == allSelection && selectedIntelligence == allSelection {
+            return [
+                ("GPT-5.6 Sol · high", SolUsagePricing.breakdown(for: report.advisor, lane: .advisor)),
+                ("GPT-5.6 Luna · max", SolUsagePricing.breakdown(for: report.worker, lane: .worker))
+            ].compactMap { label, breakdown in
+                guard let breakdown, !breakdownIsEmpty(breakdown) else { return nil }
+                return CacheBreakdownLine(id: label, label: label, breakdown: breakdown)
+            }
+        }
+
+        return []
     }
 
     var body: some View {
@@ -130,6 +189,23 @@ private struct UsagePopoverView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+
+            HStack(spacing: 8) {
+                Text("Menu bar")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Picker("Menu bar metric", selection: Binding(
+                    get: { statusMetric },
+                    set: onStatusMetricChange
+                )) {
+                    ForEach(UsageMetric.allCases) { metric in
+                        Text(metric.title).tag(metric)
+                    }
+                }
+                .pickerStyle(.menu)
                 .labelsHidden()
             }
 
@@ -200,11 +276,19 @@ private struct UsagePopoverView: View {
                             .font(.subheadline.monospacedDigit())
                     }
                 }
-            } else {
+
+                CacheBreakdownView(lines: cacheBreakdownLines)
+            } else if selectedView == .ranking {
                 ModelRankingView(
                     entries: report.modelUsage,
                     sort: rankingSort,
                     onSortChange: onRankingSortChange
+                )
+            } else {
+                DailyTrendView(
+                    reports: savedReports,
+                    metric: trendMetric,
+                    onMetricChange: onTrendMetricChange
                 )
             }
 
@@ -251,6 +335,201 @@ private struct UsagePopoverView: View {
         guard let value else { return "—" }
         if value < 1 { return String(format: "$%.4f", value) }
         return String(format: "$%.2f", value)
+    }
+}
+
+private struct CacheBreakdownLine: Identifiable {
+    let id: String
+    let label: String
+    let breakdown: UsageCostBreakdown
+}
+
+private func breakdownIsEmpty(_ breakdown: UsageCostBreakdown) -> Bool {
+    breakdown.uncachedInputTokens == 0 &&
+        breakdown.cachedInputTokens == 0 &&
+        breakdown.cacheWriteInputTokens == 0 &&
+        breakdown.outputTokens == 0
+}
+
+private struct CacheBreakdownView: View {
+    let lines: [CacheBreakdownLine]
+
+    var body: some View {
+        GroupBox {
+            if lines.isEmpty {
+                Text("No priced cache data for this selection.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 3)
+            } else {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(Array(lines.enumerated()), id: \.element.id) { index, line in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(line.label)
+                                .font(.caption.weight(.semibold))
+                                .lineLimit(1)
+                            cacheRow("Uncached input", line.breakdown.uncachedInputTokens, line.breakdown.uncachedInputCostUSD)
+                            cacheRow("Cached input", line.breakdown.cachedInputTokens, line.breakdown.cachedInputCostUSD)
+                            cacheRow("Cache writes", line.breakdown.cacheWriteInputTokens, line.breakdown.cacheWriteCostUSD)
+                            cacheRow("Output", line.breakdown.outputTokens, line.breakdown.outputCostUSD)
+                        }
+                        if index < lines.count - 1 {
+                            Divider()
+                        }
+                    }
+                    Text("Cached input and cache writes use their own API rates.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 2)
+                }
+            }
+        } label: {
+            HStack {
+                Text("Cache breakdown")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("tokens · cost")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func cacheRow(_ label: String, _ tokens: Int64, _ cost: Double) -> some View {
+        HStack(spacing: 5) {
+            Text(label)
+                .font(.caption2)
+            Spacer(minLength: 4)
+            Text(CompactTokenFormatter.string(for: tokens))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+            Text(money(cost))
+                .font(.caption2.monospacedDigit())
+                .frame(width: 64, alignment: .trailing)
+        }
+    }
+
+    private func money(_ value: Double) -> String {
+        if value < 1 { return String(format: "$%.4f", value) }
+        return String(format: "$%.2f", value)
+    }
+}
+
+private struct DailyTrendView: View {
+    let reports: [UsageReport]
+    let metric: UsageMetric
+    let onMetricChange: (UsageMetric) -> Void
+
+    private var orderedReports: [UsageReport] {
+        reports.sorted { $0.date < $1.date }
+    }
+
+    private var maximumValue: Double {
+        max(orderedReports.map(metricValue).max() ?? 0, 1)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Daily trend")
+                        .font(.headline)
+                    Text("Combined saved usage · \(orderedReports.count) day\(orderedReports.count == 1 ? "" : "s")")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Picker("Trend metric", selection: Binding(
+                    get: { metric },
+                    set: onMetricChange
+                )) {
+                    ForEach(UsageMetric.allCases) { option in
+                        Text(option.title).tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+            }
+
+            if orderedReports.isEmpty {
+                Text("The trend starts after the monitor saves its first day.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 14)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .bottom, spacing: 8) {
+                        ForEach(orderedReports, id: \.date) { report in
+                            DailyTrendBar(
+                                value: metricValue(report),
+                                maximumValue: maximumValue,
+                                valueLabel: metricLabel(report),
+                                dateLabel: String(report.date.suffix(5))
+                            )
+                        }
+                    }
+                    .frame(minWidth: max(CGFloat(orderedReports.count) * 66, 328), alignment: .leading)
+                    .padding(.horizontal, 2)
+                }
+                .frame(height: 156)
+
+                HStack {
+                    Text("Each bar is one saved Berlin calendar day.")
+                    Spacer()
+                    Text(metric.title)
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func metricValue(_ report: UsageReport) -> Double {
+        switch metric {
+        case .totalTokens: return Double(report.combined.totalTokens)
+        case .apiCost: return report.combined.apiEquivalentCostUSD ?? 0
+        }
+    }
+
+    private func metricLabel(_ report: UsageReport) -> String {
+        switch metric {
+        case .totalTokens: return CompactTokenFormatter.string(for: report.combined.totalTokens)
+        case .apiCost: return money(report.combined.apiEquivalentCostUSD)
+        }
+    }
+
+    private func money(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        if value < 1 { return String(format: "$%.4f", value) }
+        return String(format: "$%.2f", value)
+    }
+}
+
+private struct DailyTrendBar: View {
+    let value: Double
+    let maximumValue: Double
+    let valueLabel: String
+    let dateLabel: String
+
+    private var barHeight: CGFloat {
+        max(4, CGFloat(value / maximumValue) * 100)
+    }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text(valueLabel)
+                .font(.caption2.monospacedDigit())
+                .lineLimit(1)
+                .frame(width: 58)
+            Spacer(minLength: 0)
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color.accentColor.opacity(0.82))
+                .frame(width: 28, height: barHeight)
+            Text(dateLabel)
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .frame(width: 58, height: 150, alignment: .bottom)
     }
 }
 
@@ -446,12 +725,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
     private var timer: Timer?
     private var report: UsageReport
     private var todayReport: UsageReport
+    private var savedReports: [UsageReport]
     private var availableDates: [String]
     private var selectedDate: String
     private var selectedModel = allSelection
     private var selectedIntelligence = allSelection
     private var selectedView: MonitorView
     private var rankingSort: RankingSort
+    private var statusMetric: UsageMetric
+    private var trendMetric: UsageMetric
 
     override init() {
         let now = Date()
@@ -474,6 +756,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
         historyStore = history
         report = initial
         todayReport = initial
+        savedReports = history.reports()
         availableDates = history.dates()
         selectedDate = date
         selectedView = MonitorView(
@@ -481,6 +764,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
         ) ?? .overview
         rankingSort = RankingSort(
             rawValue: UserDefaults.standard.string(forKey: "rankingSort") ?? ""
+        ) ?? .totalTokens
+        statusMetric = UsageMetric(
+            rawValue: UserDefaults.standard.string(forKey: "statusMetric") ?? ""
+        ) ?? .totalTokens
+        trendMetric = UsageMetric(
+            rawValue: UserDefaults.standard.string(forKey: "trendMetric") ?? ""
         ) ?? .totalTokens
         super.init()
     }
@@ -533,17 +822,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
             guard self != nil else { return }
             let next = collector.report(generatedAt: now)
             history.save(next)
-            let dates = history.dates()
+            let reports = history.reports()
+            let dates = reports.map(\.date)
             Task { @MainActor [weak self] in
-                self?.applyToday(next, savedDates: dates)
+                self?.applyToday(next, savedDates: dates, savedReports: reports)
             }
         }
     }
 
-    private func applyToday(_ next: UsageReport, savedDates: [String]) {
+    private func applyToday(_ next: UsageReport, savedDates: [String], savedReports: [UsageReport]) {
         let oldToday = SolUsageDates.today()
         let wasViewingToday = selectedDate == oldToday
         todayReport = next
+        self.savedReports = normalizedReports(savedReports, including: next)
         availableDates = normalizedDates(savedDates, including: next.date)
         if wasViewingToday {
             selectedDate = next.date
@@ -601,6 +892,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
         resizePopover()
     }
 
+    private func selectStatusMetric(_ metric: UsageMetric) {
+        statusMetric = metric
+        UserDefaults.standard.set(metric.rawValue, forKey: "statusMetric")
+        updateStatusTitle()
+        hostingController?.rootView = makePopoverView()
+        resizePopover()
+    }
+
+    private func selectTrendMetric(_ metric: UsageMetric) {
+        trendMetric = metric
+        UserDefaults.standard.set(metric.rawValue, forKey: "trendMetric")
+        hostingController?.rootView = makePopoverView()
+        resizePopover()
+    }
+
     private func normalizeSelections() {
         let models = Set(report.modelUsage.map { $0.key.model })
         let intelligence = Set(report.modelUsage.map { $0.key.intelligence })
@@ -616,27 +922,54 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
         Array(Set(dates + [today])).sorted(by: >)
     }
 
+    private func normalizedReports(_ reports: [UsageReport], including today: UsageReport) -> [UsageReport] {
+        var byDate = Dictionary(uniqueKeysWithValues: reports.map { ($0.date, $0) })
+        byDate[today.date] = today
+        return byDate.values.sorted { $0.date < $1.date }
+    }
+
     private func updateStatusTitle() {
-        statusItem?.button?.title = todayReport.combined.compactTokenCount
+        let title: String
+        let accessibility: String
+        switch statusMetric {
+        case .totalTokens:
+            title = todayReport.combined.compactTokenCount
+            accessibility = "Today's combined Codex tokens: \(todayReport.combined.totalTokens)"
+        case .apiCost:
+            title = money(todayReport.combined.apiEquivalentCostUSD)
+            accessibility = "Today's combined Codex API-equivalent cost: \(title)"
+        }
+        statusItem?.button?.title = title
         statusItem?.button?.setAccessibilityLabel(
-            "Today's combined Codex tokens: \(todayReport.combined.totalTokens)"
+            accessibility
         )
+    }
+
+    private func money(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        if value < 1 { return String(format: "$%.4f", value) }
+        return String(format: "$%.2f", value)
     }
 
     private func makePopoverView() -> UsagePopoverView {
         UsagePopoverView(
             report: report,
+            savedReports: savedReports,
             dates: availableDates,
             selectedDate: selectedDate,
             selectedModel: selectedModel,
             selectedIntelligence: selectedIntelligence,
             selectedView: selectedView,
             rankingSort: rankingSort,
+            statusMetric: statusMetric,
+            trendMetric: trendMetric,
             onDateChange: { [weak self] date in self?.selectDate(date) },
             onModelChange: { [weak self] model in self?.selectModel(model) },
             onIntelligenceChange: { [weak self] intelligence in self?.selectIntelligence(intelligence) },
             onViewChange: { [weak self] view in self?.selectView(view) },
             onRankingSortChange: { [weak self] sort in self?.selectRankingSort(sort) },
+            onStatusMetricChange: { [weak self] metric in self?.selectStatusMetric(metric) },
+            onTrendMetricChange: { [weak self] metric in self?.selectTrendMetric(metric) },
             onRefresh: { [weak self] in self?.requestRefresh() },
             onQuit: { [weak self] in self?.quit() }
         )

@@ -44,9 +44,15 @@ snapshot; it does not backfill or scan older rollout directories. The monitor
 saves the current day as it runs, so the day picker can build history from that
 point forward.
 
-The menu app includes saved-day, model, and intelligence dropdowns plus a
-separate model-ranking view. Ranking rows are one `model` + `intelligence`
-pair, and can be sorted by total tokens or API-equivalent cost. JSON has a
+The menu app includes saved-day, model, and intelligence dropdowns plus
+separate model-ranking and daily-trend views. The trend is built only from
+daily snapshots saved while the monitor is running; it does not backfill old
+rollouts. Ranking rows are one `model` + `intelligence` pair, and can be sorted
+by total tokens or API-equivalent cost. The overview also shows a cache
+breakdown with uncached input, cached input, cache writes, output, and the
+corresponding API-equivalent cost for each priced model. The menu-bar display
+can be switched between today's combined total tokens and API-equivalent cost.
+JSON has a
 stable top-level schema with `date`, `timezone`, `range`, `start_at`, `end_at`,
 `generated_at`, `advisor`, `worker`, `combined`, `other`, `model_usage`, and
 `attribution_note`. Lane totals contain `total_tokens`, `input_tokens`,

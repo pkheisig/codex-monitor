@@ -95,6 +95,10 @@ public struct LaneTotals: Codable, Equatable, Sendable {
         CompactTokenFormatter.string(for: totalTokens)
     }
 
+    public var uncachedInputTokens: Int64 {
+        max(0, inputTokens - cachedInputTokens - cacheWriteInputTokens)
+    }
+
     public mutating func add(_ other: LaneTotals) {
         totalTokens += max(0, other.totalTokens)
         inputTokens += max(0, other.inputTokens)
@@ -141,6 +145,41 @@ public struct LaneTotals: Codable, Equatable, Sendable {
         reasoningOutputTokens = try container.decode(Int64.self, forKey: .reasoningOutputTokens)
         taskCount = try container.decode(Int.self, forKey: .taskCount)
         apiEquivalentCostUSD = try container.decodeIfPresent(Double.self, forKey: .apiEquivalentCostUSD)
+    }
+}
+
+public struct UsageCostBreakdown: Equatable, Sendable {
+    public let uncachedInputTokens: Int64
+    public let cachedInputTokens: Int64
+    public let cacheWriteInputTokens: Int64
+    public let outputTokens: Int64
+    public let uncachedInputCostUSD: Double
+    public let cachedInputCostUSD: Double
+    public let cacheWriteCostUSD: Double
+    public let outputCostUSD: Double
+
+    public var totalCostUSD: Double {
+        uncachedInputCostUSD + cachedInputCostUSD + cacheWriteCostUSD + outputCostUSD
+    }
+
+    public init(
+        uncachedInputTokens: Int64,
+        cachedInputTokens: Int64,
+        cacheWriteInputTokens: Int64,
+        outputTokens: Int64,
+        uncachedInputCostUSD: Double,
+        cachedInputCostUSD: Double,
+        cacheWriteCostUSD: Double,
+        outputCostUSD: Double
+    ) {
+        self.uncachedInputTokens = uncachedInputTokens
+        self.cachedInputTokens = cachedInputTokens
+        self.cacheWriteInputTokens = cacheWriteInputTokens
+        self.outputTokens = outputTokens
+        self.uncachedInputCostUSD = uncachedInputCostUSD
+        self.cachedInputCostUSD = cachedInputCostUSD
+        self.cacheWriteCostUSD = cacheWriteCostUSD
+        self.outputCostUSD = outputCostUSD
     }
 }
 
@@ -270,7 +309,7 @@ public enum SolUsagePricing {
 
     public static func estimate(for totals: LaneTotals, model: String) -> Double? {
         guard let rates = rates(for: model) else { return nil }
-        return estimate(for: totals, rates: rates)
+        return breakdown(for: totals, rates: rates).totalCostUSD
     }
 
     public static func estimate(for totals: LaneTotals, lane: UsageLane) -> Double {
@@ -281,17 +320,37 @@ public enum SolUsagePricing {
         case .other: return 0
         }
 
-        return estimate(for: totals, rates: rates)
+        return breakdown(for: totals, rates: rates).totalCostUSD
     }
 
-    private static func estimate(for totals: LaneTotals, rates: Rates) -> Double {
-        let uncachedInput = max(0, totals.inputTokens - totals.cachedInputTokens - totals.cacheWriteInputTokens)
-        return (
-            Double(uncachedInput) * rates.regularInputPerMillion +
-                Double(totals.cachedInputTokens) * rates.cachedInputPerMillion +
-                Double(totals.cacheWriteInputTokens) * rates.cacheWritePerMillion +
-                Double(totals.outputTokens) * rates.outputPerMillion
-        ) / 1_000_000
+    public static func breakdown(for totals: LaneTotals, model: String) -> UsageCostBreakdown? {
+        guard let rates = rates(for: model) else { return nil }
+        return breakdown(for: totals, rates: rates)
+    }
+
+    public static func breakdown(for totals: LaneTotals, lane: UsageLane) -> UsageCostBreakdown? {
+        let rates: Rates
+        switch lane {
+        case .advisor: rates = advisor
+        case .worker: rates = worker
+        case .other: return nil
+        }
+        return breakdown(for: totals, rates: rates)
+    }
+
+    private static func breakdown(for totals: LaneTotals, rates: Rates) -> UsageCostBreakdown {
+        let uncachedInput = totals.uncachedInputTokens
+        let divisor = 1_000_000.0
+        return UsageCostBreakdown(
+            uncachedInputTokens: uncachedInput,
+            cachedInputTokens: max(0, totals.cachedInputTokens),
+            cacheWriteInputTokens: max(0, totals.cacheWriteInputTokens),
+            outputTokens: max(0, totals.outputTokens),
+            uncachedInputCostUSD: Double(uncachedInput) * rates.regularInputPerMillion / divisor,
+            cachedInputCostUSD: Double(max(0, totals.cachedInputTokens)) * rates.cachedInputPerMillion / divisor,
+            cacheWriteCostUSD: Double(max(0, totals.cacheWriteInputTokens)) * rates.cacheWritePerMillion / divisor,
+            outputCostUSD: Double(max(0, totals.outputTokens)) * rates.outputPerMillion / divisor
+        )
     }
 }
 
@@ -412,6 +471,10 @@ public final class DailyHistoryStore: @unchecked Sendable {
 
     public func dates() -> [String] {
         load().keys.sorted(by: >)
+    }
+
+    public func reports() -> [UsageReport] {
+        load().values.sorted { $0.date < $1.date }
     }
 
     public func save(_ report: UsageReport) {
