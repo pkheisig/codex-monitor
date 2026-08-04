@@ -44,7 +44,9 @@ snapshot; it does not backfill or scan older rollout directories. The monitor
 saves the current day as it runs, so the day picker can build history from that
 point forward.
 
-The menu app includes saved-day, model, and intelligence dropdowns. JSON has a
+The menu app includes saved-day, model, and intelligence dropdowns plus a
+separate model-ranking view. Ranking rows are one `model` + `intelligence`
+pair, and can be sorted by total tokens or API-equivalent cost. JSON has a
 stable top-level schema with `date`, `timezone`, `range`, `start_at`, `end_at`,
 `generated_at`, `advisor`, `worker`, `combined`, `other`, `model_usage`, and
 `attribution_note`. Lane totals contain `total_tokens`, `input_tokens`,

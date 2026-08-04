@@ -4,6 +4,43 @@ import SolUsageCore
 
 private let allSelection = "__all__"
 
+private enum MonitorView: String, CaseIterable, Identifiable {
+    case overview
+    case ranking
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .overview: return "Overview"
+        case .ranking: return "Ranking"
+        }
+    }
+}
+
+private enum RankingSort: String, CaseIterable, Identifiable {
+    case totalTokens
+    case apiCost
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .totalTokens: return "Total tokens"
+        case .apiCost: return "API cost"
+        }
+    }
+}
+
+private func displayModelName(_ model: String) -> String {
+    switch model.lowercased() {
+    case "gpt-5.6-sol": return "GPT-5.6 Sol"
+    case "gpt-5.6-luna": return "GPT-5.6 Luna"
+    case "gpt-5.6-terra": return "GPT-5.6 Terra"
+    default: return model
+    }
+}
+
 @MainActor
 private struct UsagePopoverView: View {
     let report: UsageReport
@@ -11,9 +48,13 @@ private struct UsagePopoverView: View {
     let selectedDate: String
     let selectedModel: String
     let selectedIntelligence: String
+    let selectedView: MonitorView
+    let rankingSort: RankingSort
     let onDateChange: (String) -> Void
     let onModelChange: (String) -> Void
     let onIntelligenceChange: (String) -> Void
+    let onViewChange: (MonitorView) -> Void
+    let onRankingSortChange: (RankingSort) -> Void
     let onRefresh: () -> Void
     let onQuit: () -> Void
 
@@ -80,6 +121,20 @@ private struct UsagePopoverView: View {
             }
 
             HStack(spacing: 8) {
+                Picker("View", selection: Binding(
+                    get: { selectedView },
+                    set: onViewChange
+                )) {
+                    ForEach(MonitorView.allCases) { view in
+                        Text(view.title).tag(view)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+
+            if selectedView == .overview {
+                HStack(spacing: 8) {
                 Picker("Model", selection: Binding(
                     get: { selectedModel },
                     set: onModelChange
@@ -105,54 +160,61 @@ private struct UsagePopoverView: View {
                 .pickerStyle(.menu)
                 .labelsHidden()
                 .frame(maxWidth: .infinity, alignment: .leading)
-            }
+                }
 
-            if hasSpecificSelection {
-                UsageLaneCard(
-                    title: "Selected usage",
-                    subtitle: selectionSummary,
-                    totals: selectedTotals
-                )
+                if hasSpecificSelection {
+                    UsageLaneCard(
+                        title: "Selected usage",
+                        subtitle: selectionSummary,
+                        totals: selectedTotals
+                    )
+                } else {
+                    UsageLaneCard(
+                        title: "Sol",
+                        subtitle: "GPT-5.6 Sol · high",
+                        totals: report.advisor
+                    )
+                    UsageLaneCard(
+                        title: "Luna",
+                        subtitle: "GPT-5.6 Luna · max",
+                        totals: report.worker
+                    )
+                }
+
+                Divider()
+
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(hasSpecificSelection ? "Selected total" : "Combined")
+                            .font(.headline)
+                        Text("API-equivalent estimate")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 2) {
+                        let totals = hasSpecificSelection ? selectedTotals : report.combined
+                        Text(totals.compactTokenCount)
+                            .font(.headline.monospacedDigit())
+                        Text(money(totals.apiEquivalentCostUSD))
+                            .font(.subheadline.monospacedDigit())
+                    }
+                }
             } else {
-                UsageLaneCard(
-                    title: "Sol",
-                    subtitle: "GPT-5.6 Sol · high",
-                    totals: report.advisor
+                ModelRankingView(
+                    entries: report.modelUsage,
+                    sort: rankingSort,
+                    onSortChange: onRankingSortChange
                 )
-                UsageLaneCard(
-                    title: "Luna",
-                    subtitle: "GPT-5.6 Luna · max",
-                    totals: report.worker
-                )
-            }
-
-            Divider()
-
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(hasSpecificSelection ? "Selected total" : "Combined")
-                        .font(.headline)
-                    Text("API-equivalent estimate")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 2) {
-                    let totals = hasSpecificSelection ? selectedTotals : report.combined
-                    Text(totals.compactTokenCount)
-                        .font(.headline.monospacedDigit())
-                    Text(money(totals.apiEquivalentCostUSD))
-                        .font(.subheadline.monospacedDigit())
-                }
             }
 
             if !report.other.isZero {
-                Text("Other / excluded: (report.other.compactTokenCount) tokens")
+                Text("Other / excluded: \(report.other.compactTokenCount) tokens")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            Text("Updated (report.generatedAt)")
+            Text("Updated \(report.generatedAt)")
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
             Text("Estimate is not Codex subscription billing.")
@@ -183,6 +245,118 @@ private struct UsagePopoverView: View {
         case "gpt-5.6-terra": return "GPT-5.6 Terra"
         default: return model
         }
+    }
+
+    private func money(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        if value < 1 { return String(format: "$%.4f", value) }
+        return String(format: "$%.2f", value)
+    }
+}
+
+private struct ModelRankingView: View {
+    let entries: [ModelUsage]
+    let sort: RankingSort
+    let onSortChange: (RankingSort) -> Void
+
+    private var rankedEntries: [ModelUsage] {
+        entries.sorted { lhs, rhs in
+            switch sort {
+            case .totalTokens:
+                if lhs.totals.totalTokens != rhs.totals.totalTokens {
+                    return lhs.totals.totalTokens > rhs.totals.totalTokens
+                }
+            case .apiCost:
+                let leftCost = lhs.totals.apiEquivalentCostUSD ?? -Double.infinity
+                let rightCost = rhs.totals.apiEquivalentCostUSD ?? -Double.infinity
+                if leftCost != rightCost {
+                    return leftCost > rightCost
+                }
+            }
+            return lhs.key.id < rhs.key.id
+        }
+    }
+
+    private var listHeight: CGFloat {
+        min(CGFloat(rankedEntries.count) * 58, 300)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Model ranking")
+                        .font(.headline)
+                    Text("Each row is one model + reasoning pair")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Picker("Rank by", selection: Binding(
+                    get: { sort },
+                    set: onSortChange
+                )) {
+                    ForEach(RankingSort.allCases) { option in
+                        Text(option.title).tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+            }
+
+            if rankedEntries.isEmpty {
+                Text("No attributed model usage for this day.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 8)
+            } else {
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(rankedEntries.enumerated()), id: \.offset) { index, entry in
+                            ModelRankingRow(rank: index + 1, entry: entry)
+                        }
+                    }
+                }
+                .frame(height: listHeight)
+            }
+        }
+    }
+}
+
+private struct ModelRankingRow: View {
+    let rank: Int
+    let entry: ModelUsage
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text("#\(rank)")
+                .font(.caption.weight(.semibold).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 24, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(displayModelName(entry.key.model)) · \(entry.key.intelligence)")
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Text("In \(CompactTokenFormatter.string(for: entry.totals.inputTokens)) · Out \(CompactTokenFormatter.string(for: entry.totals.outputTokens))")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 4)
+
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(entry.totals.compactTokenCount)
+                    .font(.subheadline.monospacedDigit())
+                Text(money(entry.totals.apiEquivalentCostUSD))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .background(Color.primary.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
     }
 
     private func money(_ value: Double?) -> String {
@@ -276,6 +450,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
     private var selectedDate: String
     private var selectedModel = allSelection
     private var selectedIntelligence = allSelection
+    private var selectedView: MonitorView
+    private var rankingSort: RankingSort
 
     override init() {
         let now = Date()
@@ -300,6 +476,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
         todayReport = initial
         availableDates = history.dates()
         selectedDate = date
+        selectedView = MonitorView(
+            rawValue: UserDefaults.standard.string(forKey: "selectedView") ?? ""
+        ) ?? .overview
+        rankingSort = RankingSort(
+            rawValue: UserDefaults.standard.string(forKey: "rankingSort") ?? ""
+        ) ?? .totalTokens
         super.init()
     }
 
@@ -405,6 +587,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
         resizePopover()
     }
 
+    private func selectView(_ view: MonitorView) {
+        selectedView = view
+        UserDefaults.standard.set(view.rawValue, forKey: "selectedView")
+        hostingController?.rootView = makePopoverView()
+        resizePopover()
+    }
+
+    private func selectRankingSort(_ sort: RankingSort) {
+        rankingSort = sort
+        UserDefaults.standard.set(sort.rawValue, forKey: "rankingSort")
+        hostingController?.rootView = makePopoverView()
+        resizePopover()
+    }
+
     private func normalizeSelections() {
         let models = Set(report.modelUsage.map { $0.key.model })
         let intelligence = Set(report.modelUsage.map { $0.key.intelligence })
@@ -434,9 +630,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
             selectedDate: selectedDate,
             selectedModel: selectedModel,
             selectedIntelligence: selectedIntelligence,
+            selectedView: selectedView,
+            rankingSort: rankingSort,
             onDateChange: { [weak self] date in self?.selectDate(date) },
             onModelChange: { [weak self] model in self?.selectModel(model) },
             onIntelligenceChange: { [weak self] intelligence in self?.selectIntelligence(intelligence) },
+            onViewChange: { [weak self] view in self?.selectView(view) },
+            onRankingSortChange: { [weak self] sort in self?.selectRankingSort(sort) },
             onRefresh: { [weak self] in self?.requestRefresh() },
             onQuit: { [weak self] in self?.quit() }
         )
