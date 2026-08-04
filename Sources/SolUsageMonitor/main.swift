@@ -1,20 +1,26 @@
 import AppKit
+import Combine
 import SwiftUI
 import SolUsageCore
 
 private let allSelection = "__all__"
 
+private final class MonitorPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 private enum MonitorView: String, CaseIterable, Identifiable {
-    case overview
     case ranking
+    case overview
     case trend
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .overview: return "Overview"
         case .ranking: return "Ranking"
+        case .overview: return "Details"
         case .trend: return "Trend"
         }
     }
@@ -78,17 +84,41 @@ private struct UsagePopoverView: View {
     let onTrendMetricChange: (UsageMetric) -> Void
     let onRefresh: () -> Void
     let onQuit: () -> Void
+    let onResizeChanged: (CGSize) -> Void
+    let onResizeEnded: () -> Void
 
     private var modelOptions: [String] {
-        [allSelection] + Set(report.modelUsage.map { $0.key.model }).sorted()
+        [allSelection] + Set(rankingEntries.map { $0.key.model }).sorted()
     }
 
     private var intelligenceOptions: [String] {
-        [allSelection] + Set(report.modelUsage.map { $0.key.intelligence }).sorted()
+        [allSelection] + Set(rankingEntries.map { $0.key.intelligence }).sorted()
+    }
+
+    /// Older saved snapshots predate `model_usage`. Keep the ranking useful
+    /// immediately after an upgrade by deriving the two exact lane entries
+    /// from the totals that were already persisted.
+    private var rankingEntries: [ModelUsage] {
+        if !report.modelUsage.isEmpty { return report.modelUsage }
+
+        var fallback: [ModelUsage] = []
+        if !report.advisor.isZero {
+            fallback.append(ModelUsage(
+                key: UsageModelKey(model: "gpt-5.6-sol", intelligence: "high"),
+                totals: report.advisor
+            ))
+        }
+        if !report.worker.isZero {
+            fallback.append(ModelUsage(
+                key: UsageModelKey(model: "gpt-5.6-luna", intelligence: "max"),
+                totals: report.worker
+            ))
+        }
+        return fallback
     }
 
     private var filteredModelUsage: [ModelUsage] {
-        report.modelUsage.filter { usage in
+        rankingEntries.filter { usage in
             (selectedModel == allSelection || usage.key.model == selectedModel) &&
                 (selectedIntelligence == allSelection || usage.key.intelligence == selectedIntelligence)
         }
@@ -154,7 +184,7 @@ private struct UsagePopoverView: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .firstTextBaseline) {
                 Text("Codex Monitor")
-                    .font(.headline)
+                    .font(.headline.weight(.semibold))
                 Spacer()
                 Text(report.date == SolUsageDates.today() ? "Today" : report.date)
                     .font(.caption.monospacedDigit())
@@ -209,96 +239,105 @@ private struct UsagePopoverView: View {
                 .labelsHidden()
             }
 
-            if selectedView == .overview {
-                HStack(spacing: 8) {
-                Picker("Model", selection: Binding(
-                    get: { selectedModel },
-                    set: onModelChange
-                )) {
-                    Text("All models").tag(allSelection)
-                    ForEach(modelOptions.dropFirst(), id: \.self) { model in
-                        Text(modelLabel(model)).tag(model)
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 8) {
+                    if selectedView == .overview {
+                        HStack(spacing: 8) {
+                            Picker("Model", selection: Binding(
+                                get: { selectedModel },
+                                set: onModelChange
+                            )) {
+                                Text("All models").tag(allSelection)
+                                ForEach(modelOptions.dropFirst(), id: \.self) { model in
+                                    Text(modelLabel(model)).tag(model)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                            Picker("Intelligence", selection: Binding(
+                                get: { selectedIntelligence },
+                                set: onIntelligenceChange
+                            )) {
+                                Text("All intelligence").tag(allSelection)
+                                ForEach(intelligenceOptions.dropFirst(), id: \.self) { intelligence in
+                                    Text(intelligence).tag(intelligence)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        if hasSpecificSelection {
+                            UsageLaneCard(
+                                title: "Selected usage",
+                                subtitle: selectionSummary,
+                                totals: selectedTotals
+                            )
+                        } else {
+                            UsageLaneCard(
+                                title: "GPT-5.6 Sol",
+                                subtitle: "high",
+                                totals: report.advisor
+                            )
+                            UsageLaneCard(
+                                title: "GPT-5.6 Luna",
+                                subtitle: "max",
+                                totals: report.worker
+                            )
+                        }
+
+                        Divider()
+
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(hasSpecificSelection ? "Selected total" : "Combined")
+                                    .font(.headline)
+                                Text("API-equivalent estimate")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 2) {
+                                let totals = hasSpecificSelection ? selectedTotals : report.combined
+                                Text(totals.compactTokenCount)
+                                    .font(.headline.monospacedDigit())
+                                Text(money(totals.apiEquivalentCostUSD))
+                                    .font(.subheadline.monospacedDigit())
+                            }
+                        }
+
+                        CacheBreakdownView(lines: cacheBreakdownLines)
+                    } else if selectedView == .ranking {
+                        ModelRankingView(
+                            entries: rankingEntries,
+                            sort: rankingSort,
+                            onSortChange: onRankingSortChange
+                        )
+                    } else {
+                        DailyTrendView(
+                            reports: savedReports,
+                            metric: trendMetric,
+                            onMetricChange: onTrendMetricChange
+                        )
                     }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(maxWidth: .infinity, alignment: .leading)
 
-                Picker("Intelligence", selection: Binding(
-                    get: { selectedIntelligence },
-                    set: onIntelligenceChange
-                )) {
-                    Text("All intelligence").tag(allSelection)
-                    ForEach(intelligenceOptions.dropFirst(), id: \.self) { intelligence in
-                        Text(intelligence).tag(intelligence)
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                if hasSpecificSelection {
-                    UsageLaneCard(
-                        title: "Selected usage",
-                        subtitle: selectionSummary,
-                        totals: selectedTotals
-                    )
-                } else {
-                    UsageLaneCard(
-                        title: "Sol",
-                        subtitle: "GPT-5.6 Sol · high",
-                        totals: report.advisor
-                    )
-                    UsageLaneCard(
-                        title: "Luna",
-                        subtitle: "GPT-5.6 Luna · max",
-                        totals: report.worker
-                    )
-                }
-
-                Divider()
-
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(hasSpecificSelection ? "Selected total" : "Combined")
-                            .font(.headline)
-                        Text("API-equivalent estimate")
-                            .font(.caption2)
+                    if !report.other.isZero {
+                        Text("Other / excluded: \(report.other.compactTokenCount) tokens")
+                            .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 2) {
-                        let totals = hasSpecificSelection ? selectedTotals : report.combined
-                        Text(totals.compactTokenCount)
-                            .font(.headline.monospacedDigit())
-                        Text(money(totals.apiEquivalentCostUSD))
-                            .font(.subheadline.monospacedDigit())
-                    }
                 }
-
-                CacheBreakdownView(lines: cacheBreakdownLines)
-            } else if selectedView == .ranking {
-                ModelRankingView(
-                    entries: report.modelUsage,
-                    sort: rankingSort,
-                    onSortChange: onRankingSortChange
-                )
-            } else {
-                DailyTrendView(
-                    reports: savedReports,
-                    metric: trendMetric,
-                    onMetricChange: onTrendMetricChange
-                )
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // The AppKit panel owns the height. Keeping this view flexible
+            // makes the native resize handle reveal more or less of the list
+            // instead of forcing the panel back to a fixed SwiftUI height.
+            .frame(maxHeight: .infinity, alignment: .top)
 
-            if !report.other.isZero {
-                Text("Other / excluded: \(report.other.compactTokenCount) tokens")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Text("Updated \(report.generatedAt)")
+            Text("Updated \(SolUsageDates.displayTimestamp(report.generatedAt))")
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
             Text("Estimate is not Codex subscription billing.")
@@ -307,19 +346,36 @@ private struct UsagePopoverView: View {
 
             HStack {
                 Button("Refresh", action: onRefresh)
-                    .keyboardShortcut("r")
+                    .keyboardShortcut("r", modifiers: [.command])
                 Spacer()
                 Button("Quit", action: onQuit)
                     .keyboardShortcut("q")
             }
         }
-        .padding(14)
-        .frame(width: 360, alignment: .topLeading)
-        .fixedSize(horizontal: false, vertical: true)
+        .font(.system(size: 14))
+        .controlSize(.small)
+        .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .windowBackgroundColor).opacity(0.96))
+        .overlay(alignment: .bottomTrailing) {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(4)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in onResizeChanged(value.translation) }
+                        .onEnded { _ in onResizeEnded() }
+                )
+                .help("Resize Codex Monitor")
+        }
     }
 
     private func dayLabel(_ date: String) -> String {
-        date == SolUsageDates.today() ? "Today · \(date)" : date
+        date == SolUsageDates.today()
+            ? "Today · \(SolUsageDates.displayDate(date))"
+            : SolUsageDates.displayDate(date)
     }
 
     private func modelLabel(_ model: String) -> String {
@@ -366,7 +422,7 @@ private struct CacheBreakdownView: View {
                     ForEach(Array(lines.enumerated()), id: \.element.id) { index, line in
                         VStack(alignment: .leading, spacing: 3) {
                             Text(line.label)
-                                .font(.caption.weight(.semibold))
+                                .font(.subheadline.weight(.semibold))
                                 .lineLimit(1)
                             cacheRow("Uncached input", line.breakdown.uncachedInputTokens, line.breakdown.uncachedInputCostUSD)
                             cacheRow("Cached input", line.breakdown.cachedInputTokens, line.breakdown.cachedInputCostUSD)
@@ -398,13 +454,13 @@ private struct CacheBreakdownView: View {
     private func cacheRow(_ label: String, _ tokens: Int64, _ cost: Double) -> some View {
         HStack(spacing: 5) {
             Text(label)
-                .font(.caption2)
+                .font(.caption)
             Spacer(minLength: 4)
             Text(CompactTokenFormatter.string(for: tokens))
-                .font(.caption2.monospacedDigit())
+                .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
             Text(money(cost))
-                .font(.caption2.monospacedDigit())
+                .font(.caption.monospacedDigit())
                 .frame(width: 64, alignment: .trailing)
         }
     }
@@ -556,10 +612,6 @@ private struct ModelRankingView: View {
         }
     }
 
-    private var listHeight: CGFloat {
-        min(CGFloat(rankedEntries.count) * 58, 300)
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -589,14 +641,11 @@ private struct ModelRankingView: View {
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 8)
             } else {
-                ScrollView(.vertical, showsIndicators: true) {
-                    LazyVStack(alignment: .leading, spacing: 6) {
-                        ForEach(Array(rankedEntries.enumerated()), id: \.offset) { index, entry in
-                            ModelRankingRow(rank: index + 1, entry: entry)
-                        }
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(rankedEntries.enumerated()), id: \.offset) { index, entry in
+                        ModelRankingRow(rank: index + 1, entry: entry)
                     }
                 }
-                .frame(height: listHeight)
             }
         }
     }
@@ -615,7 +664,7 @@ private struct ModelRankingRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(displayModelName(entry.key.model)) · \(entry.key.intelligence)")
-                    .font(.subheadline.weight(.semibold))
+                    .font(.body.weight(.semibold))
                     .lineLimit(1)
                 Text("In \(CompactTokenFormatter.string(for: entry.totals.inputTokens)) · Out \(CompactTokenFormatter.string(for: entry.totals.outputTokens))")
                     .font(.caption2.monospacedDigit())
@@ -626,7 +675,7 @@ private struct ModelRankingRow: View {
 
             VStack(alignment: .trailing, spacing: 2) {
                 Text(entry.totals.compactTokenCount)
-                    .font(.subheadline.monospacedDigit())
+                    .font(.body.monospacedDigit())
                 Text(money(entry.totals.apiEquivalentCostUSD))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -682,10 +731,10 @@ private struct UsageLaneCard: View {
         } label: {
             HStack {
                 Text(title)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.body.weight(.semibold))
                 Spacer()
                 Text(subtitle)
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -699,7 +748,7 @@ private struct UsageLaneCard: View {
             Text(NumberFormatter.localizedString(from: NSNumber(value: value), number: .decimal))
                 .monospacedDigit()
         }
-        .font(.caption2)
+        .font(.caption)
     }
 
     private func money(_ value: Double?) -> String {
@@ -710,30 +759,40 @@ private struct UsageLaneCard: View {
 }
 
 @MainActor
-private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
-    private static let popoverWidth: CGFloat = 360
+private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableObject, @unchecked Sendable {
+    private static let selectedViewDefaultsKey = "selectedView.v2"
+    private static let statusItemAutosaveName = "com.pkheisig.codexmonitor.primary-status-item"
+    private static let defaultPanelSize = NSSize(width: 300, height: 560)
+    private static let minimumPanelSize = NSSize(width: 280, height: 320)
+    private static let maximumPanelSize = NSSize(width: 520, height: 980)
+    private static let panelWidthDefaultsKey = "panelWidth"
+    private static let panelHeightDefaultsKey = "panelHeight"
+    private static let panelSizeConfiguredKey = "panelSizeConfigured.v1"
 
     private let collector: UsageCollector
     private let historyStore: DailyHistoryStore
     private let refreshQueue = DispatchQueue(
-        label: "com.pkheisig.codex-monitor.refresh",
+        label: "com.pkheisig.codexmonitor.refresh",
         qos: .utility
     )
-    private var statusItem: NSStatusItem!
-    private var popover: NSPopover!
-    private var hostingController: NSHostingController<UsagePopoverView>!
     private var timer: Timer?
-    private var report: UsageReport
-    private var todayReport: UsageReport
-    private var savedReports: [UsageReport]
-    private var availableDates: [String]
-    private var selectedDate: String
-    private var selectedModel = allSelection
-    private var selectedIntelligence = allSelection
-    private var selectedView: MonitorView
-    private var rankingSort: RankingSort
-    private var statusMetric: UsageMetric
-    private var trendMetric: UsageMetric
+    private var statusItem: NSStatusItem!
+    private var panel: MonitorPanel!
+    private var hostingController: NSHostingController<UsagePopoverView>!
+    private var outsideClickMonitor: Any?
+    private var resizeStartFrame: NSRect?
+    private var suppressPanelPersistence = true
+    @Published private(set) var report: UsageReport
+    @Published private(set) var todayReport: UsageReport
+    @Published private(set) var savedReports: [UsageReport]
+    @Published private(set) var availableDates: [String]
+    @Published private(set) var selectedDate: String
+    @Published private(set) var selectedModel = allSelection
+    @Published private(set) var selectedIntelligence = allSelection
+    @Published private(set) var selectedView: MonitorView
+    @Published private(set) var rankingSort: RankingSort
+    @Published private(set) var statusMetric: UsageMetric
+    @Published private(set) var trendMetric: UsageMetric
 
     override init() {
         let now = Date()
@@ -760,8 +819,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
         availableDates = history.dates()
         selectedDate = date
         selectedView = MonitorView(
-            rawValue: UserDefaults.standard.string(forKey: "selectedView") ?? ""
-        ) ?? .overview
+            rawValue: UserDefaults.standard.string(forKey: Self.selectedViewDefaultsKey) ?? ""
+        ) ?? .ranking
         rankingSort = RankingSort(
             rawValue: UserDefaults.standard.string(forKey: "rankingSort") ?? ""
         ) ?? .totalTokens
@@ -777,21 +836,54 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
+        // Use the same native status-item lifecycle as Parrot. The panel is
+        // intentionally resizable; unlike a SwiftUI MenuBarExtra popover,
+        // AppKit keeps the user's chosen height instead of restoring a
+        // remembered natural size.
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.target = self
-        statusItem.button?.action = #selector(togglePopover(_:))
-        statusItem.button?.toolTip = "Codex Monitor"
-        updateStatusTitle()
+        statusItem.autosaveName = Self.statusItemAutosaveName
+        statusItem.behavior = []
+        statusItem.isVisible = true
+        configureStatusButton()
 
-        popover = NSPopover()
-        // A transient popover closes automatically when the user clicks
-        // anywhere outside it, including another app.
-        popover.behavior = .transient
-        popover.animates = false
+        let panelSize = Self.savedPanelSize()
+        let panel = MonitorPanel(
+            contentRect: NSRect(origin: .zero, size: panelSize),
+            styleMask: [.titled, .nonactivatingPanel, .fullSizeContentView, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isFloatingPanel = true
+        panel.level = .statusBar
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.standardWindowButton(.closeButton)?.isHidden = true
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        panel.minSize = Self.minimumPanelSize
+        panel.maxSize = Self.maximumPanelSize
+        panel.contentMinSize = Self.minimumPanelSize
+        panel.contentMaxSize = Self.maximumPanelSize
+        panel.delegate = self
+        self.panel = panel
+
         hostingController = NSHostingController(rootView: makePopoverView())
-        hostingController.sizingOptions = [.preferredContentSize]
-        popover.contentViewController = hostingController
-        resizePopover()
+        // Let the panel, not SwiftUI's preferred content size, own resizing.
+        hostingController.sizingOptions = []
+        hostingController.view.wantsLayer = true
+        hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
+        panel.contentViewController = hostingController
+        panel.setFrame(
+            NSRect(origin: panel.frame.origin, size: panelSize),
+            display: false
+        )
+        suppressPanelPersistence = false
+        installOutsideClickMonitor()
 
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -801,17 +893,32 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
         requestRefresh()
     }
 
-    @objc private func togglePopover(_ sender: Any?) {
+    private func configureStatusButton() {
         guard let button = statusItem.button else { return }
-        if popover.isShown {
-            popover.performClose(nil)
-            return
-        }
+        let image = NSImage(
+            systemSymbolName: "chart.bar.fill",
+            accessibilityDescription: "Codex Monitor"
+        )
+        image?.isTemplate = true
+        button.image = image
+        button.imagePosition = .imageLeft
+        button.imageScaling = .scaleProportionallyDown
+        button.title = statusLabel
+        button.target = self
+        button.action = #selector(togglePopover(_:))
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        button.toolTip = "Codex Monitor"
+        button.setAccessibilityTitle("Codex Monitor")
+        button.setAccessibilityLabel("Codex Monitor: \(statusLabel)")
+        button.appearsDisabled = false
+    }
 
-        resizePopover()
-        // .minY anchors the panel below the menu-bar item. Animations are off
-        // so it never briefly draws at an oversized position above the bar.
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    @objc private func togglePopover(_ sender: Any?) {
+        if panel.isVisible {
+            hidePanel()
+        } else {
+            showPanel()
+        }
     }
 
     private func requestRefresh() {
@@ -841,9 +948,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
             report = next
         }
         normalizeSelections()
-        updateStatusTitle()
-        hostingController?.rootView = makePopoverView()
-        resizePopover()
+        refreshPanel()
+        updateStatusItem()
     }
 
     private func selectDate(_ date: String) {
@@ -860,51 +966,44 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
             return
         }
         normalizeSelections()
-        hostingController?.rootView = makePopoverView()
-        resizePopover()
+        refreshPanel()
     }
 
     private func selectModel(_ model: String) {
         selectedModel = model
         UserDefaults.standard.set(model, forKey: "selectedModel")
-        hostingController?.rootView = makePopoverView()
-        resizePopover()
+        refreshPanel()
     }
 
     private func selectIntelligence(_ intelligence: String) {
         selectedIntelligence = intelligence
         UserDefaults.standard.set(intelligence, forKey: "selectedIntelligence")
-        hostingController?.rootView = makePopoverView()
-        resizePopover()
+        refreshPanel()
     }
 
     private func selectView(_ view: MonitorView) {
         selectedView = view
-        UserDefaults.standard.set(view.rawValue, forKey: "selectedView")
-        hostingController?.rootView = makePopoverView()
-        resizePopover()
+        UserDefaults.standard.set(view.rawValue, forKey: Self.selectedViewDefaultsKey)
+        refreshPanel()
     }
 
     private func selectRankingSort(_ sort: RankingSort) {
         rankingSort = sort
         UserDefaults.standard.set(sort.rawValue, forKey: "rankingSort")
-        hostingController?.rootView = makePopoverView()
-        resizePopover()
+        refreshPanel()
     }
 
     private func selectStatusMetric(_ metric: UsageMetric) {
         statusMetric = metric
         UserDefaults.standard.set(metric.rawValue, forKey: "statusMetric")
-        updateStatusTitle()
-        hostingController?.rootView = makePopoverView()
-        resizePopover()
+        refreshPanel()
+        updateStatusItem()
     }
 
     private func selectTrendMetric(_ metric: UsageMetric) {
         trendMetric = metric
         UserDefaults.standard.set(metric.rawValue, forKey: "trendMetric")
-        hostingController?.rootView = makePopoverView()
-        resizePopover()
+        refreshPanel()
     }
 
     private func normalizeSelections() {
@@ -928,21 +1027,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
         return byDate.values.sorted { $0.date < $1.date }
     }
 
-    private func updateStatusTitle() {
-        let title: String
-        let accessibility: String
+    fileprivate var statusLabel: String {
         switch statusMetric {
         case .totalTokens:
-            title = todayReport.combined.compactTokenCount
-            accessibility = "Today's combined Codex tokens: \(todayReport.combined.totalTokens)"
+            return todayReport.combined.compactTokenCount
         case .apiCost:
-            title = money(todayReport.combined.apiEquivalentCostUSD)
-            accessibility = "Today's combined Codex API-equivalent cost: \(title)"
+            return money(todayReport.combined.apiEquivalentCostUSD)
         }
-        statusItem?.button?.title = title
-        statusItem?.button?.setAccessibilityLabel(
-            accessibility
-        )
     }
 
     private func money(_ value: Double?) -> String {
@@ -951,7 +1042,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
         return String(format: "$%.2f", value)
     }
 
-    private func makePopoverView() -> UsagePopoverView {
+    fileprivate func makePopoverView() -> UsagePopoverView {
         UsagePopoverView(
             report: report,
             savedReports: savedReports,
@@ -971,18 +1062,121 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
             onStatusMetricChange: { [weak self] metric in self?.selectStatusMetric(metric) },
             onTrendMetricChange: { [weak self] metric in self?.selectTrendMetric(metric) },
             onRefresh: { [weak self] in self?.requestRefresh() },
-            onQuit: { [weak self] in self?.quit() }
+            onQuit: { [weak self] in self?.quit() },
+            onResizeChanged: { [weak self] translation in self?.resizePanel(by: translation) },
+            onResizeEnded: { [weak self] in self?.finishPanelResize() }
         )
     }
 
-    private func resizePopover() {
-        guard let hostingController else { return }
-        let view = hostingController.view
-        view.invalidateIntrinsicContentSize()
-        view.layoutSubtreeIfNeeded()
-        let preferredHeight = hostingController.preferredContentSize.height
-        let fittingHeight = max(1, preferredHeight > 1 ? preferredHeight : view.fittingSize.height)
-        popover?.contentSize = NSSize(width: Self.popoverWidth, height: fittingHeight)
+    private func refreshPanel() {
+        guard hostingController != nil else { return }
+        hostingController.rootView = makePopoverView()
+        hostingController.view.needsLayout = true
+    }
+
+    private func updateStatusItem() {
+        guard let button = statusItem?.button else { return }
+        button.title = statusLabel
+        button.setAccessibilityLabel("Codex Monitor: \(statusLabel)")
+        button.appearsDisabled = false
+    }
+
+    private func showPanel() {
+        guard let button = statusItem?.button, let buttonWindow = button.window else { return }
+        refreshPanel()
+
+        let buttonFrame = buttonWindow.convertToScreen(button.frame)
+        var screen = NSScreen.main
+        for candidate in NSScreen.screens {
+            if candidate.frame.contains(NSPoint(x: buttonFrame.midX, y: buttonFrame.midY)) {
+                screen = candidate
+                break
+            }
+        }
+        let visibleFrame = screen?.visibleFrame ?? .zero
+        var origin = NSPoint(
+            x: buttonFrame.midX - panel.frame.width / 2,
+            y: buttonFrame.minY - panel.frame.height - 8
+        )
+        origin.x = min(max(origin.x, visibleFrame.minX + 8), visibleFrame.maxX - panel.frame.width - 8)
+        origin.y = max(origin.y, visibleFrame.minY + 8)
+        panel.setFrameOrigin(origin)
+        panel.makeKeyAndOrderFront(nil)
+        panel.orderFrontRegardless()
+    }
+
+    private func hidePanel() {
+        panel.orderOut(nil)
+    }
+
+    private func installOutsideClickMonitor() {
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.panel.isVisible, self.resizeStartFrame == nil else { return }
+                let mouseLocation = NSEvent.mouseLocation
+                if self.panel.frame.contains(mouseLocation) { return }
+                if let button = self.statusItem?.button,
+                   let buttonWindow = button.window,
+                   buttonWindow.convertToScreen(button.frame).contains(mouseLocation) {
+                    return
+                }
+                self.hidePanel()
+            }
+        }
+    }
+
+    private static func savedPanelSize() -> NSSize {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: panelSizeConfiguredKey) else { return defaultPanelSize }
+        let width = defaults.double(forKey: panelWidthDefaultsKey)
+        let height = defaults.double(forKey: panelHeightDefaultsKey)
+        guard width > 0, height > 0 else { return defaultPanelSize }
+        return NSSize(
+            width: min(max(width, minimumPanelSize.width), maximumPanelSize.width),
+            height: min(max(height, minimumPanelSize.height), maximumPanelSize.height)
+        )
+    }
+
+    private func resizePanel(by translation: CGSize) {
+        guard let panel else { return }
+        if resizeStartFrame == nil {
+            resizeStartFrame = panel.frame
+        }
+        guard let startFrame = resizeStartFrame else { return }
+
+        let width = min(
+            max(startFrame.width + translation.width, Self.minimumPanelSize.width),
+            Self.maximumPanelSize.width
+        )
+        let height = min(
+            max(startFrame.height + translation.height, Self.minimumPanelSize.height),
+            Self.maximumPanelSize.height
+        )
+        var frame = startFrame
+        frame.size = NSSize(width: width, height: height)
+        // Keep the top edge anchored below the menu bar while the bottom edge
+        // follows the drag, just like a native bottom-right resize handle.
+        frame.origin.y = startFrame.maxY - height
+        panel.setFrame(frame, display: true)
+    }
+
+    private func finishPanelResize() {
+        persistPanelSize()
+        resizeStartFrame = nil
+    }
+
+    private func persistPanelSize() {
+        guard let panel, !suppressPanelPersistence else { return }
+        let defaults = UserDefaults.standard
+        defaults.set(panel.frame.width, forKey: Self.panelWidthDefaultsKey)
+        defaults.set(panel.frame.height, forKey: Self.panelHeightDefaultsKey)
+        defaults.set(true, forKey: Self.panelSizeConfiguredKey)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        persistPanelSize()
     }
 
     private func quit() {
@@ -991,6 +1185,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sen
 
     func applicationWillTerminate(_ notification: Notification) {
         timer?.invalidate()
+        if let outsideClickMonitor {
+            NSEvent.removeMonitor(outsideClickMonitor)
+        }
     }
 }
 

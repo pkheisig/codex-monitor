@@ -1,9 +1,10 @@
 import Foundation
 import CoreFoundation
 
-/// Reads only the requested Europe/Berlin calendar day's local Codex rollout
-/// files. It is intentionally a simple, read-only collector: the menu app and
-/// CLI reparse today's eligible files on their 30-second refresh cadence.
+/// Reads the requested Europe/Berlin calendar day's local Codex rollout files,
+/// including adjacent storage days for cross-midnight rollouts. It is
+/// intentionally a simple, read-only collector: the menu app and CLI reparse
+/// today's eligible files on their 30-second refresh cadence.
 public final class UsageCollector: @unchecked Sendable {
     public static func defaultDataRoots(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [SolUsageDataRoot] {
         let codex = home.appendingPathComponent(".codex", isDirectory: true)
@@ -354,18 +355,20 @@ public final class UsageCollector: @unchecked Sendable {
                 urls = [root.url]
                 dateScoped = true
             } else if rootName == "sessions" {
-                let parts = date.split(separator: "-")
-                guard parts.count == 3 else { continue }
-                let dayDirectory = parts.reduce(root.url) { partial, component in
-                    partial.appendingPathComponent(String(component), isDirectory: true)
-                }
-                let enumerator = FileManager.default.enumerator(
-                    at: dayDirectory,
-                    includingPropertiesForKeys: nil,
-                    options: [.skipsPackageDescendants]
-                )
-                urls = enumerator?.compactMap { $0 as? URL } ?? []
-                dateScoped = true
+                // A rollout is stored under the day it started. If it crosses
+                // midnight, later token snapshots remain in that same folder,
+                // so inspect only the neighboring storage days and filter by
+                // the requested Berlin day below.
+                urls = sessionDayDirectories(for: date, root: root.url)
+                    .flatMap { dayDirectory in
+                        let enumerator = FileManager.default.enumerator(
+                            at: dayDirectory,
+                            includingPropertiesForKeys: nil,
+                            options: [.skipsPackageDescendants]
+                        )
+                        return enumerator?.compactMap { $0 as? URL } ?? []
+                    }
+                dateScoped = false
             } else if rootName == "archived_sessions" {
                 urls = (try? FileManager.default.contentsOfDirectory(
                     at: root.url,
@@ -402,6 +405,25 @@ public final class UsageCollector: @unchecked Sendable {
         }
 
         return result.sorted { $0.path < $1.path }
+    }
+
+    private func sessionDayDirectories(for date: String, root: URL) -> [URL] {
+        guard let start = SolUsageDates.startOfDay(for: date) else { return [] }
+        return (-1...1).compactMap { offset in
+            guard let day = SolUsageDates.calendar.date(byAdding: .day, value: offset, to: start) else {
+                return nil
+            }
+            let components = SolUsageDates.calendar.dateComponents([.year, .month, .day], from: day)
+            guard let year = components.year,
+                  let month = components.month,
+                  let day = components.day else {
+                return nil
+            }
+            return root
+                .appendingPathComponent(String(format: "%04d", year), isDirectory: true)
+                .appendingPathComponent(String(format: "%02d", month), isDirectory: true)
+                .appendingPathComponent(String(format: "%02d", day), isDirectory: true)
+        }
     }
 
     private func metadata(for url: URL) -> FileMetadata? {

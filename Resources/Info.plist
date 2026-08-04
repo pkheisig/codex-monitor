@@ -6,8 +6,14 @@
 	<string>en</string>
 	<key>CFBundleExecutable</key>
 	<string>CodexMonitor</string>
-	<key>CFBundleIdentifier</key>
-	<string>com.pkheisig.codex-monitor</string>
+    <key>CFBundleIdentifier</key>
+    <!--
+      Keep this identity separate from the old Codex Monitor registration.
+      macOS persists menu-bar status-item visibility by bundle identity; the
+      previous identity had been recorded as hidden, which caused MenuBarExtra
+      to receive a visibility change and terminate on launch.
+    -->
+    <string>com.pkheisig.codexmonitor</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>

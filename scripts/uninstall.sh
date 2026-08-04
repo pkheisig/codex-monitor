@@ -7,10 +7,12 @@ OLD_APP_DIR="/Applications/Sol Usage Monitor.app"
 OLD_HOME_APP_DIR="$HOME/Applications/Sol Usage Monitor.app"
 CLI_PATH="$HOME/.local/bin/codex-monitor"
 LEGACY_CLI_PATH="$HOME/.local/bin/sol-usage"
-PLIST_PATH="$HOME/Library/LaunchAgents/com.pkheisig.codex-monitor.plist"
-OLD_PLIST_PATH="$HOME/Library/LaunchAgents/com.pkheisig.sol-usage-monitor.plist"
-LABEL="com.pkheisig.codex-monitor"
-OLD_LABEL="com.pkheisig.sol-usage-monitor"
+PLIST_PATH="$HOME/Library/LaunchAgents/com.pkheisig.codexmonitor.plist"
+OLD_PLIST_PATH="$HOME/Library/LaunchAgents/com.pkheisig.codex-monitor.plist"
+LEGACY_PLIST_PATH="$HOME/Library/LaunchAgents/com.pkheisig.sol-usage-monitor.plist"
+LABEL="com.pkheisig.codexmonitor"
+OLD_LABEL="com.pkheisig.codex-monitor"
+LEGACY_LABEL="com.pkheisig.sol-usage-monitor"
 REMOVE_SOURCE=false
 
 if [[ "${1:-}" == "--remove-source" ]]; then
@@ -23,6 +25,8 @@ fi
 UID_VALUE="$(id -u)"
 launchctl bootout "gui/$UID_VALUE/$LABEL" >/dev/null 2>&1 || true
 launchctl bootout "gui/$UID_VALUE/$OLD_LABEL" >/dev/null 2>&1 || true
+launchctl bootout "gui/$UID_VALUE/$LEGACY_LABEL" >/dev/null 2>&1 || true
+pkill -x CodexMonitor >/dev/null 2>&1 || true
 
 rm -rf "$APP_DIR"
 rm -rf "$OLD_APP_DIR"
@@ -30,7 +34,7 @@ rm -rf "$OLD_HOME_APP_DIR"
 rm -f "$CLI_PATH"
 rm -f "$LEGACY_CLI_PATH"
 rm -f "$PLIST_PATH"
-rm -f "$OLD_PLIST_PATH"
+rm -f "$OLD_PLIST_PATH" "$LEGACY_PLIST_PATH"
 
 if $REMOVE_SOURCE; then
     rm -rf "$PROJECT_DIR"

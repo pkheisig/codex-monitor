@@ -428,6 +428,26 @@ public enum SolUsageDates {
         return formatter.string(from: date)
     }
 
+    /// Human-readable Berlin-local timestamp for the menu-bar UI.
+    public static func displayTimestamp(_ value: String) -> String {
+        guard let date = isoDate(from: value) else { return value }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_GB")
+        formatter.timeZone = timezone
+        formatter.dateFormat = "dd MMM yyyy, HH:mm"
+        return "\(formatter.string(from: date)) (Berlin)"
+    }
+
+    /// Human-readable Berlin-local calendar date for day selectors.
+    public static func displayDate(_ value: String) -> String {
+        guard let date = startOfDay(for: value) else { return value }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_GB")
+        formatter.timeZone = timezone
+        formatter.dateFormat = "dd MMM yyyy"
+        return formatter.string(from: date)
+    }
+
     internal static let calendar: Calendar = {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = timezone
