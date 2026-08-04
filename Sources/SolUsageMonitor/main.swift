@@ -67,6 +67,8 @@ private func displayModelName(_ model: String) -> String {
 private struct UsagePopoverView: View {
     let report: UsageReport
     let savedReports: [UsageReport]
+    let quota: CodexQuotaSnapshot?
+    let quotaError: String?
     let dates: [String]
     let selectedDate: String
     let selectedModel: String
@@ -241,6 +243,8 @@ private struct UsagePopoverView: View {
 
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 8) {
+                    CodexQuotaView(snapshot: quota, errorMessage: quotaError)
+
                     if selectedView == .overview {
                         HStack(spacing: 8) {
                             Picker("Model", selection: Binding(
@@ -391,6 +395,161 @@ private struct UsagePopoverView: View {
         guard let value else { return "—" }
         if value < 1 { return String(format: "$%.4f", value) }
         return String(format: "$%.2f", value)
+    }
+}
+
+private struct CodexQuotaView: View {
+    let snapshot: CodexQuotaSnapshot?
+    let errorMessage: String?
+
+    private var visibleWindows: [CodexQuotaWindow] {
+        guard let snapshot else { return [] }
+        var result: [CodexQuotaWindow] = []
+        if let weekly = snapshot.weekly { result.append(weekly) }
+        if let spark = snapshot.sparkWeekly, !result.contains(where: { $0.id == spark.id }) {
+            result.append(spark)
+        }
+        for window in snapshot.windows where !result.contains(where: { $0.id == window.id }) {
+            result.append(window)
+        }
+        if let codeReview = snapshot.codeReview,
+           !result.contains(where: { $0.id == codeReview.id })
+        {
+            result.append(codeReview)
+        }
+        return result
+    }
+
+    var body: some View {
+        GroupBox {
+            if let snapshot {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        if let email = snapshot.accountEmail, !email.isEmpty {
+                            Text(email)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 4)
+                        if let plan = snapshot.plan, !plan.isEmpty {
+                            Text(plan.capitalized)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    ForEach(visibleWindows) { window in
+                        quotaWindow(window)
+                    }
+
+                    if let credits = snapshot.creditsRemaining {
+                        Divider()
+                        HStack {
+                            Text("Credits")
+                            Spacer()
+                            Text(String(format: "%.2f left", credits))
+                                .font(.subheadline.monospacedDigit())
+                        }
+                    }
+
+                    HStack {
+                        Text("Updated \(SolUsageDates.displayTimestamp(SolUsageDates.isoString(for: snapshot.fetchedAt)))")
+                        Spacer()
+                        if let errorMessage, !errorMessage.isEmpty {
+                            Text("stale")
+                        }
+                    }
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+
+                    if let errorMessage, !errorMessage.isEmpty {
+                        Text(errorMessage)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Codex limits")
+                        .font(.subheadline.weight(.semibold))
+                    Text(errorMessage ?? "Waiting for the authenticated Codex usage response…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        } label: {
+            Text("Codex limits")
+                .font(.subheadline.weight(.semibold))
+        }
+    }
+
+    @ViewBuilder
+    private func quotaWindow(_ window: CodexQuotaWindow) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(window.title)
+                    .font(.body.weight(.semibold))
+                Spacer()
+                if window.usageKnown {
+                    Text("\(percent(window.remainingPercent))% left")
+                        .font(.subheadline.monospacedDigit())
+                } else {
+                    Text("Usage unavailable")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if window.usageKnown {
+                ProgressView(value: window.remainingPercent, total: 100)
+                    .tint(.accentColor)
+            }
+
+            HStack(alignment: .firstTextBaseline) {
+                if let pace = window.pace() {
+                    if pace.deficitPercent >= 0.5 {
+                        Text("\(percent(pace.deficitPercent))% in deficit")
+                    } else {
+                        Text("On pace")
+                    }
+                }
+                Spacer()
+                if let resetsAt = window.resetsAt {
+                    Text("Resets in \(duration(until: resetsAt))")
+                }
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+
+            if let pace = window.pace(), let runsOutIn = pace.runsOutIn {
+                HStack {
+                    Spacer()
+                    Text(runsOutIn == 0 ? "Exhausted" : "Runs out in \(duration(seconds: runsOutIn))")
+                }
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func percent(_ value: Double) -> String {
+        String(Int(value.rounded()))
+    }
+
+    private func duration(until date: Date) -> String {
+        duration(seconds: max(0, date.timeIntervalSinceNow))
+    }
+
+    private func duration(seconds: TimeInterval) -> String {
+        let totalMinutes = max(0, Int(seconds / 60))
+        let days = totalMinutes / (24 * 60)
+        let hours = (totalMinutes % (24 * 60)) / 60
+        let minutes = totalMinutes % 60
+        if days > 0 { return "\(days)d \(hours)h" }
+        if hours > 0 { return "\(hours)h \(minutes)m" }
+        return "\(minutes)m"
     }
 }
 
@@ -771,6 +930,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     private let collector: UsageCollector
     private let historyStore: DailyHistoryStore
+    private let quotaFetcher: CodexQuotaFetcher
+    private let quotaStore: CodexQuotaStore
     private let refreshQueue = DispatchQueue(
         label: "com.pkheisig.codexmonitor.refresh",
         qos: .utility
@@ -786,6 +947,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     @Published private(set) var todayReport: UsageReport
     @Published private(set) var savedReports: [UsageReport]
     @Published private(set) var availableDates: [String]
+    @Published private(set) var quota: CodexQuotaSnapshot?
+    @Published private(set) var quotaError: String?
     @Published private(set) var selectedDate: String
     @Published private(set) var selectedModel = allSelection
     @Published private(set) var selectedIntelligence = allSelection
@@ -798,6 +961,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let now = Date()
         let date = SolUsageDates.today(now: now)
         let history = DailyHistoryStore()
+        let quotaStore = CodexQuotaStore()
         let start = SolUsageDates.startOfDay(for: date) ?? now
         let empty = UsageReport(
             date: date,
@@ -813,10 +977,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let initial = history.report(for: date) ?? empty
         collector = UsageCollector()
         historyStore = history
+        quotaFetcher = CodexQuotaFetcher()
+        self.quotaStore = quotaStore
         report = initial
         todayReport = initial
         savedReports = history.reports()
         availableDates = history.dates()
+        quota = quotaStore.load()
+        quotaError = nil
         selectedDate = date
         selectedView = MonitorView(
             rawValue: UserDefaults.standard.string(forKey: Self.selectedViewDefaultsKey) ?? ""
@@ -925,21 +1093,52 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let now = Date()
         let collector = self.collector
         let history = self.historyStore
+        let quotaFetcher = self.quotaFetcher
+        let quotaStore = self.quotaStore
         refreshQueue.async { [weak self] in
             guard self != nil else { return }
             let next = collector.report(generatedAt: now)
             history.save(next)
             let reports = history.reports()
             let dates = reports.map(\.date)
-            Task { @MainActor [weak self] in
-                self?.applyToday(next, savedDates: dates, savedReports: reports)
+            Task.detached(priority: .utility) { [weak self] in
+                var freshQuota: CodexQuotaSnapshot?
+                var quotaError: String?
+                do {
+                    freshQuota = try await quotaFetcher.fetch(now: now)
+                    if let freshQuota {
+                        quotaStore.save(freshQuota)
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    quotaError = error.localizedDescription
+                }
+                await MainActor.run {
+                    self?.applyToday(
+                        next,
+                        savedDates: dates,
+                        savedReports: reports,
+                        quota: freshQuota,
+                        quotaError: quotaError)
+                }
             }
         }
     }
 
-    private func applyToday(_ next: UsageReport, savedDates: [String], savedReports: [UsageReport]) {
+    private func applyToday(
+        _ next: UsageReport,
+        savedDates: [String],
+        savedReports: [UsageReport],
+        quota: CodexQuotaSnapshot?,
+        quotaError: String?)
+    {
         let oldToday = SolUsageDates.today()
         let wasViewingToday = selectedDate == oldToday
+        if let quota {
+            self.quota = quota
+        }
+        self.quotaError = quotaError
         todayReport = next
         self.savedReports = normalizedReports(savedReports, including: next)
         availableDates = normalizedDates(savedDates, including: next.date)
@@ -1046,6 +1245,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         UsagePopoverView(
             report: report,
             savedReports: savedReports,
+            quota: quota,
+            quotaError: quotaError,
             dates: availableDates,
             selectedDate: selectedDate,
             selectedModel: selectedModel,

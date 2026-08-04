@@ -34,6 +34,7 @@ rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BIN_DIR/SolUsageMonitor" "$APP_EXECUTABLE"
 cp "$PROJECT_DIR/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
+cp "$PROJECT_DIR/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 chmod 755 "$APP_EXECUTABLE"
 
 cp "$BIN_DIR/sol-usage" "$CLI_PATH"

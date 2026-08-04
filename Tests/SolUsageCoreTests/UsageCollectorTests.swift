@@ -196,6 +196,49 @@ final class UsageCollectorTests: XCTestCase {
         XCTAssertNil(other["api_equivalent_cost_usd"])
     }
 
+    func testCodexQuotaParserMapsWeeklySparkAndPace() throws {
+        let now = try isoDate("2026-08-04T12:00:00Z")
+        let reset = Int(now.timeIntervalSince1970) + 3 * 24 * 60 * 60 + 12 * 60 * 60
+        let payload = """
+        {
+          "plan_type": "pro",
+          "email": "user@example.com",
+          "rate_limit": {
+            "primary_window": {
+              "used_percent": 68,
+              "limit_window_seconds": 604800,
+              "reset_at": \(reset)
+            },
+            "secondary_window": null
+          },
+          "additional_rate_limits": [{
+            "limit_name": "GPT-5.3-Codex-Spark",
+            "metered_feature": "codex_bengalfox",
+            "rate_limit": {
+              "primary_window": {
+                "used_percent": 0,
+                "limit_window_seconds": 604800,
+                "reset_at": \(reset + 7 * 24 * 60 * 60)
+              }
+            }
+          }],
+          "credits": {"balance": 4492.03}
+        }
+        """
+
+        let snapshot = try CodexQuotaFetcher.parse(Data(payload.utf8), now: now)
+
+        XCTAssertEqual(snapshot.accountEmail, "user@example.com")
+        XCTAssertEqual(snapshot.plan, "pro")
+        XCTAssertEqual(snapshot.weekly?.title, "Weekly")
+        XCTAssertEqual(snapshot.weekly?.remainingPercent ?? -1, 32, accuracy: 0.001)
+        XCTAssertEqual(snapshot.sparkWeekly?.title, "Codex Spark Weekly")
+        XCTAssertEqual(snapshot.sparkWeekly?.remainingPercent ?? -1, 100, accuracy: 0.001)
+        XCTAssertEqual(snapshot.creditsRemaining ?? -1, 4492.03, accuracy: 0.001)
+        XCTAssertEqual(snapshot.weekly?.pace(now: now)?.deficitPercent ?? -1, 18, accuracy: 0.001)
+        XCTAssertNotNil(snapshot.weekly?.pace(now: now)?.runsOutIn)
+    }
+
     func testDailyHistoryStoresOnlyDerivedReportsAndSortsDays() throws {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("sol-usage-history-\(UUID().uuidString)", isDirectory: true)

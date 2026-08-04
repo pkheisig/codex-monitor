@@ -20,6 +20,8 @@
 	<string>Codex Monitor</string>
 	<key>CFBundleDisplayName</key>
 	<string>Codex Monitor</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon.icns</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

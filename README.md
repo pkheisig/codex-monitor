@@ -1,13 +1,16 @@
 # Codex Monitor
 
 `Codex Monitor` is a dependency-free native macOS utility, menu-bar extra, and CLI
-for today's local Codex token usage in two exact Sol Advisor lanes:
+for today's local Codex token usage in two exact model/reasoning lanes:
 
 - Advisor: `gpt-5.6-sol` with `high` reasoning
 - Worker: `gpt-5.6-luna` with `max` reasoning
 
-It reads local JSONL rollout logs only. It makes no network requests, sends no
-data to a model, and does not modify Codex logs or plugin files.
+It reads local JSONL rollout logs and, when the normal Codex OAuth file is
+available, reads the authenticated Codex usage-limits endpoint used by
+CodexBar. The access token stays local and is never persisted by this app;
+the monitor stores only the returned quota snapshot. It sends no data to a
+model and does not modify Codex logs or plugin files.
 
 ## Build and install
 
@@ -30,6 +33,12 @@ so a normal Quit remains stopped until the next login or manual launch.
 The app has its own clean menu-bar identity and is independent of Codex's
 presentation settings. It is ad-hoc signed for local use and requests no
 special permissions.
+
+The panel includes the latest Codex subscription limits: weekly remaining,
+pace deficit, reset and projected run-out timing, model-specific Spark limits,
+and credits when the account endpoint provides them. A cached quota snapshot is
+shown when a later refresh cannot reach the endpoint. The app bundle includes a
+custom Codex Monitor icon.
 
 ## CLI
 
