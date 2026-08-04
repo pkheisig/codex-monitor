@@ -71,6 +71,46 @@ final class UsageCollectorTests: XCTestCase {
         XCTAssertEqual(exact.endAt, "2026-08-04T00:00:00.000+02:00")
     }
 
+    func testHumanReadableBerlinDateAndTimestamp() {
+        XCTAssertEqual(SolUsageDates.displayDate("2026-08-04"), "04 Aug 2026")
+        XCTAssertEqual(
+            SolUsageDates.displayTimestamp("2026-08-04T09:57:22.385+02:00"),
+            "04 Aug 2026, 09:57 (Berlin)"
+        )
+    }
+
+    func testSessionFromPreviousStorageDayCanContributeAfterMidnight() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sol-usage-cross-midnight-\(UUID().uuidString)", isDirectory: true)
+        let dayDirectory = home
+            .appendingPathComponent("sessions", isDirectory: true)
+            .appendingPathComponent("2026", isDirectory: true)
+            .appendingPathComponent("08", isDirectory: true)
+            .appendingPathComponent("03", isDirectory: true)
+        let file = dayDirectory.appendingPathComponent("rollout-2026-08-03T23-30-00-cross-midnight.jsonl")
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        try FileManager.default.createDirectory(at: dayDirectory, withIntermediateDirectories: true)
+        let context = "{\"timestamp\":\"2026-08-04T00:30:00Z\",\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.6-luna\",\"collaboration_mode\":{\"settings\":{\"reasoning_effort\":\"max\"}}}}\n"
+        let token = "{\"timestamp\":\"2026-08-04T00:30:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":4,\"output_tokens\":2,\"total_tokens\":6}}}}\n"
+        try Data((context + token).utf8).write(to: file)
+        try FileManager.default.setAttributes(
+            [.modificationDate: try isoDate("2026-08-04T00:31:00Z")],
+            ofItemAtPath: file.path
+        )
+
+        let generatedAt = try isoDate("2026-08-04T01:00:00Z")
+        let report = UsageCollector(dataRoots: [
+            SolUsageDataRoot(url: home.appendingPathComponent("sessions"), recursive: true)
+        ]).report(for: "2026-08-04", generatedAt: generatedAt)
+
+        XCTAssertEqual(report.worker.totalTokens, 6)
+        XCTAssertTrue(report.modelUsage.contains {
+            $0.key == UsageModelKey(model: "gpt-5.6-luna", intelligence: "max") &&
+                $0.totals.totalTokens == 6
+        })
+    }
+
     func testCostIncludesCacheWritesAndUsesCurrentLunaRates() throws {
         let advisor = try fixtureFile(named: "rollout-2026-03-26T00-00-00-cost-advisor.jsonl")
         let worker = try fixtureFile(named: "rollout-2026-03-29T11-30-00-cost-worker.jsonl")

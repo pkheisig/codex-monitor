@@ -1,6 +1,6 @@
 # Codex Monitor
 
-`Codex Monitor` is a dependency-free native macOS menu-bar utility and CLI
+`Codex Monitor` is a dependency-free native macOS utility, menu-bar extra, and CLI
 for today's local Codex token usage in two exact Sol Advisor lanes:
 
 - Advisor: `gpt-5.6-sol` with `high` reasoning
@@ -23,11 +23,13 @@ The installer creates:
 
 - `/Applications/Codex Monitor.app`
 - `~/.local/bin/codex-monitor`
-- `~/Library/LaunchAgents/com.pkheisig.codex-monitor.plist`
+- `~/Library/LaunchAgents/com.pkheisig.codexmonitor.plist`
 
-The LaunchAgent starts the app at login and restarts it after an unsuccessful
-exit. The Quit button exits successfully, so a normal Quit remains stopped.
-The app is ad-hoc signed for local use and requests no special permissions.
+The LaunchAgent starts the app at login. The Quit button exits successfully,
+so a normal Quit remains stopped until the next login or manual launch.
+The app has its own clean menu-bar identity and is independent of Codex's
+presentation settings. It is ad-hoc signed for local use and requests no
+special permissions.
 
 ## CLI
 
@@ -63,10 +65,12 @@ stable top-level schema with `date`, `timezone`, `range`, `start_at`, `end_at`,
 ## Data and performance semantics
 
 For today's report, the collector enumerates only the matching
-`~/.codex/sessions/YYYY/MM/DD` directory and top-level archived rollout files
-whose rollout date or modification date is today. It does not scan older
-session directories or perform archive-wide content reads. Each refresh streams
-eligible JSONL files in order and cheaply rejects lines that are not
+`~/.codex/sessions/YYYY/MM/DD` directory and its two neighboring session-day
+directories, allowing a rollout that crosses midnight to contribute its later
+events. It then keeps only files whose rollout date or modification date is the
+requested Berlin day. Top-level archived rollout files use the same date
+filter. It does not scan the full sessions tree or perform archive-wide content
+reads. Each refresh streams eligible JSONL files in order and cheaply rejects lines that are not
 `turn_context` or `event_msg` token-count records before using Foundation JSON
 decoding. Large response/tool/world-state lines are never JSON-decoded.
 
