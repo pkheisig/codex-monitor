@@ -233,10 +233,20 @@ public struct CodexQuotaFetcher: Sendable {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
 
+        // Do not let the shared URLSession persist response data or cookies
+        // that could contain account metadata. The token is used only for this
+        // in-memory request and is never written by the monitor.
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpCookieAcceptPolicy = .never
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await session.data(for: request)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
