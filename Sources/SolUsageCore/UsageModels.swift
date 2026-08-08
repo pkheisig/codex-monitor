@@ -225,6 +225,30 @@ public struct UsageReport: Codable, Equatable, Sendable {
         self.attributionNote = attributionNote
     }
 
+    /// All token usage observed in the requested interval, including model or
+    /// reasoning combinations that are intentionally excluded from the two
+    /// named lane cards.
+    public var observed: LaneTotals {
+        var totals = combined
+        totals.add(other)
+        totals.apiEquivalentCostUSD = observedAPICostUSD
+        return totals
+    }
+
+    /// Sums known per-model estimates so the menu bar agrees with the ranking.
+    /// An unknown model remains unpriced instead of receiving an invented rate;
+    /// its tokens are excluded from this subtotal.
+    public var observedAPICostUSD: Double? {
+        guard !modelUsage.isEmpty else { return combined.apiEquivalentCostUSD }
+        let pricedCosts = modelUsage.compactMap { $0.totals.apiEquivalentCostUSD }
+        guard !pricedCosts.isEmpty else { return nil }
+        return pricedCosts.reduce(0, +)
+    }
+
+    public var hasUnpricedModelUsage: Bool {
+        modelUsage.contains { $0.totals.apiEquivalentCostUSD == nil }
+    }
+
     enum CodingKeys: String, CodingKey {
         case date
         case timezone
@@ -367,6 +391,34 @@ public enum CompactTokenFormatter {
         default:
             return NumberFormatter.localizedString(from: NSNumber(value: value), number: .decimal)
         }
+    }
+}
+
+public enum CompactMoneyFormatter {
+    public static func string(for value: Double?) -> String {
+        guard let value, value.isFinite else { return "—" }
+        let number = max(0, value)
+
+        if number < 1 {
+            return String(format: "$%.4f", number)
+        }
+        if number < 1_000 {
+            return String(format: "$%.2f", number)
+        }
+        if number >= 1_000_000_000 {
+            return scaled(number / 1_000_000_000, suffix: "B")
+        }
+        if number >= 1_000_000 {
+            return scaled(number / 1_000_000, suffix: "M")
+        }
+        return scaled(number / 1_000, suffix: "K")
+    }
+
+    private static func scaled(_ value: Double, suffix: String) -> String {
+        let rounded = (value * 10).rounded() / 10
+        let formatted = String(format: "%.1f", rounded)
+        let number = formatted.hasSuffix(".0") ? String(formatted.dropLast(2)) : formatted
+        return "$\(number)\(suffix)"
     }
 }
 

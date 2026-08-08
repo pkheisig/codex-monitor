@@ -11,6 +11,11 @@
 		<string>-a</string>
 		<string>__APP_PATH__</string>
 	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>CODEX_HOME</key>
+		<string>__CODEX_HOME__</string>
+	</dict>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>

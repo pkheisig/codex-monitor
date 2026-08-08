@@ -17,6 +17,7 @@ LEGACY_LABEL="com.pkheisig.sol-usage-monitor"
 
 mkdir -p "$HOME/.local/bin" "$HOME/Library/LaunchAgents"
 
+(cd "$PROJECT_DIR" && swift build -c release)
 BIN_DIR="$(cd "$PROJECT_DIR" && swift build -c release --show-bin-path)"
 
 # A SwiftUI MenuBarExtra must be launched through LaunchServices (`open`) to
@@ -45,6 +46,8 @@ chmod 755 "$LEGACY_CLI_PATH"
 cp "$PROJECT_DIR/Resources/com.pkheisig.codex-monitor.plist.template" "$PLIST_PATH"
 plutil -remove ProgramArguments.3 "$PLIST_PATH"
 plutil -insert ProgramArguments.3 -string "$APP_DIR" "$PLIST_PATH"
+CODEX_HOME_VALUE="${CODEX_HOME:-$HOME/.codex}"
+plutil -replace EnvironmentVariables.CODEX_HOME -string "$CODEX_HOME_VALUE" "$PLIST_PATH"
 plutil -lint "$APP_DIR/Contents/Info.plist" >/dev/null
 plutil -lint "$PLIST_PATH" >/dev/null
 

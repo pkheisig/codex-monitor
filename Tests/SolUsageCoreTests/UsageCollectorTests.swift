@@ -26,6 +26,10 @@ final class UsageCollectorTests: XCTestCase {
         XCTAssertEqual(report.other.taskCount, 1)
         XCTAssertEqual(report.combined.totalTokens, 25)
         XCTAssertEqual(report.combined.taskCount, 2)
+        XCTAssertEqual(report.observed.totalTokens, 41)
+        XCTAssertEqual(report.observed.taskCount, 3)
+        let modelCost = report.modelUsage.compactMap { $0.totals.apiEquivalentCostUSD }.reduce(0, +)
+        XCTAssertEqual(report.observedAPICostUSD ?? -1, modelCost, accuracy: 0.0000000001)
         XCTAssertTrue(report.modelUsage.contains {
             $0.key == UsageModelKey(model: "gpt-5.6-sol", intelligence: "high") &&
                 $0.totals.totalTokens == 19
@@ -34,6 +38,33 @@ final class UsageCollectorTests: XCTestCase {
             $0.key == UsageModelKey(model: "gpt-5.6-luna", intelligence: "max") &&
                 $0.totals.totalTokens == 6
         })
+    }
+
+    func testObservedCostKeepsPricedSubtotalWhenOneModelIsUnknown() {
+        let report = UsageReport(
+            date: "2026-08-08",
+            rangeIdentifier: "today",
+            startAt: "",
+            endAt: "",
+            generatedAt: "",
+            advisor: .zero,
+            worker: .zero,
+            combined: .zero,
+            other: .zero,
+            modelUsage: [
+                ModelUsage(
+                    key: UsageModelKey(model: "gpt-5.6-sol", intelligence: "high"),
+                    totals: LaneTotals(apiEquivalentCostUSD: 12.5)
+                ),
+                ModelUsage(
+                    key: UsageModelKey(model: "codex-auto-review", intelligence: "low"),
+                    totals: LaneTotals()
+                )
+            ]
+        )
+
+        XCTAssertEqual(report.observedAPICostUSD ?? -1, 12.5, accuracy: 0.0000000001)
+        XCTAssertTrue(report.hasUnpricedModelUsage)
     }
 
     func testBerlinDayBoundaryMalformedLinesMissingFieldsAndReset() throws {
@@ -111,6 +142,89 @@ final class UsageCollectorTests: XCTestCase {
         })
     }
 
+    func testRangeReportDiscoversMultipleSessionDaysAndAllTime() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sol-usage-range-\(UUID().uuidString)", isDirectory: true)
+        let sessions = home.appendingPathComponent("sessions", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let first = sessions
+            .appendingPathComponent("2026", isDirectory: true)
+            .appendingPathComponent("08", isDirectory: true)
+            .appendingPathComponent("02", isDirectory: true)
+            .appendingPathComponent("rollout-2026-08-02T12-00-00-range.jsonl")
+        let second = sessions
+            .appendingPathComponent("2026", isDirectory: true)
+            .appendingPathComponent("08", isDirectory: true)
+            .appendingPathComponent("03", isDirectory: true)
+            .appendingPathComponent("rollout-2026-08-03T12-00-00-range.jsonl")
+        let firstPayload = """
+        {"timestamp":"2026-08-02T12:00:00Z","type":"turn_context","payload":{"model":"gpt-5.6-sol","collaboration_mode":{"settings":{"reasoning_effort":"high"}}}}
+        {"timestamp":"2026-08-02T12:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":8,"output_tokens":2,"total_tokens":10}}}}
+        """
+        let secondPayload = """
+        {"timestamp":"2026-08-03T12:00:00Z","type":"turn_context","payload":{"model":"gpt-5.6-sol","collaboration_mode":{"settings":{"reasoning_effort":"high"}}}}
+        {"timestamp":"2026-08-03T12:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":16,"output_tokens":4,"total_tokens":20}}}}
+        """
+        try FileManager.default.createDirectory(at: first.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: second.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(firstPayload.utf8).write(to: first)
+        try Data(secondPayload.utf8).write(to: second)
+
+        let collector = UsageCollector(dataRoots: [SolUsageDataRoot(url: sessions, recursive: true)])
+        let generatedAt = try isoDate("2026-08-04T12:00:00Z")
+        let interval = UsageInterval(
+            rangeIdentifier: "last-week",
+            start: try isoDate("2026-08-02T00:00:00Z"),
+            end: generatedAt,
+            dateLabel: "last-week"
+        )
+        let range = collector.report(for: interval, generatedAt: generatedAt)
+        XCTAssertEqual(range.advisor.totalTokens, 30)
+        XCTAssertEqual(range.advisor.taskCount, 2)
+
+        let allTime = collector.report(for: UsageInterval(
+            rangeIdentifier: "all-time",
+            start: Date(timeIntervalSince1970: 0),
+            end: generatedAt,
+            dateLabel: "all-time"
+        ), generatedAt: generatedAt)
+        XCTAssertEqual(allTime.advisor.totalTokens, 30)
+        XCTAssertEqual(allTime.rangeIdentifier, "all-time")
+    }
+
+    func testCollectorAppendsOnlyNewBytesWhenAFileGrows() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sol-usage-incremental-\(UUID().uuidString)", isDirectory: true)
+        let file = directory.appendingPathComponent("rollout-2026-08-03T12-00-00-incremental.jsonl")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let first = """
+        {"timestamp":"2026-08-03T12:00:00Z","type":"turn_context","payload":{"model":"gpt-5.6-luna","collaboration_mode":{"settings":{"reasoning_effort":"max"}}}}
+        {"timestamp":"2026-08-03T12:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6}}}}
+        """
+        try Data(first.utf8).write(to: file)
+
+        let collector = UsageCollector(dataRoots: [SolUsageDataRoot(url: file, recursive: false)])
+        let generatedAt = try isoDate("2026-08-03T13:00:00Z")
+        let initial = collector.report(for: "2026-08-03", generatedAt: generatedAt)
+        XCTAssertEqual(initial.worker.totalTokens, 6)
+
+        let second = """
+        {"timestamp":"2026-08-03T12:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}}
+        """
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(second.utf8))
+        try handle.close()
+
+        let refreshed = collector.report(for: "2026-08-03", generatedAt: generatedAt)
+        XCTAssertEqual(refreshed.worker.totalTokens, 10)
+        XCTAssertEqual(refreshed.worker.inputTokens, 7)
+        XCTAssertEqual(refreshed.worker.outputTokens, 3)
+    }
+
     func testCostIncludesCacheWritesAndUsesCurrentLunaRates() throws {
         let advisor = try fixtureFile(named: "rollout-2026-03-26T00-00-00-cost-advisor.jsonl")
         let worker = try fixtureFile(named: "rollout-2026-03-29T11-30-00-cost-worker.jsonl")
@@ -163,6 +277,16 @@ final class UsageCollectorTests: XCTestCase {
         XCTAssertEqual(breakdown?.outputCostUSD ?? -1, 7 * 1.20 / 1_000_000, accuracy: 0.0000000001)
         let expectedCost = (35 * 0.20 + 10 * 0.02 + 5 * 0.25 + 7 * 1.20) / 1_000_000
         XCTAssertEqual(breakdown?.totalCostUSD ?? -1, expectedCost, accuracy: 0.0000000001)
+    }
+
+    func testCompactMoneyFormattingKeepsLargeSpendShort() {
+        XCTAssertEqual(CompactMoneyFormatter.string(for: nil), "—")
+        XCTAssertEqual(CompactMoneyFormatter.string(for: 0.12345), "$0.1235")
+        XCTAssertEqual(CompactMoneyFormatter.string(for: 660.36), "$660.36")
+        XCTAssertEqual(CompactMoneyFormatter.string(for: 1_000), "$1K")
+        XCTAssertEqual(CompactMoneyFormatter.string(for: 1_250), "$1.3K")
+        XCTAssertEqual(CompactMoneyFormatter.string(for: 1_250_000), "$1.3M")
+        XCTAssertEqual(CompactMoneyFormatter.string(for: 1_000_000_000), "$1B")
     }
 
     func testHugeIrrelevantLineIsRejectedBeforeJSONDecoding() throws {

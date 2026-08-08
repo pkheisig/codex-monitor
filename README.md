@@ -30,6 +30,9 @@ The installer creates:
 
 The LaunchAgent starts the app at login. The Quit button exits successfully,
 so a normal Quit remains stopped until the next login or manual launch.
+The installer records the current `CODEX_HOME` in the LaunchAgent, so the app
+and CLI read the same Codex data root; rerun the installer after switching
+Codex homes.
 The app has its own clean menu-bar identity and is independent of Codex's
 presentation settings. It is ad-hoc signed for local use and requests no
 special permissions.
@@ -64,21 +67,33 @@ codex-monitor --date 2026-08-03
 ```
 
 The default report is the current Europe/Berlin calendar day through now.
-`--watch` refreshes every 30 seconds. `--date` reads a saved Berlin calendar-day
+`--watch` refreshes every second. `--date` reads a saved Berlin calendar-day
 snapshot; it does not backfill or scan older rollout directories. The monitor
-saves the current day as it runs, so the day picker can build history from that
-point forward.
+saves the current day as it runs, so the range picker and daily trend can build
+history from that point forward.
 
-The menu app includes saved-day, model, and intelligence dropdowns plus
+The menu app includes Today, Last week, Last month, and All time range choices,
+plus model and intelligence dropdowns and
 separate model-ranking and daily-trend views. The trend is built only from
 daily snapshots saved while the monitor is running; it does not backfill old
-rollouts. Ranking rows are one `model` + `intelligence` pair, and can be sorted
+rollouts. Last week and Last month are trailing seven- and 30-day Berlin
+calendar windows including today; All time scans the available rollout logs.
+Ranking rows are one `model` + `intelligence` pair, and can be sorted
 by total tokens or API-equivalent cost. The overview also shows a cache
 breakdown with uncached input, cached input, cache writes, output, and the
 corresponding API-equivalent cost for each priced model. The menu-bar display
-can be switched between today's combined total tokens and API-equivalent cost.
+can be switched between all observed total tokens and the sum of
+API-equivalent costs for the ranked model entries. It refreshes local usage
+every second; the authenticated quota endpoint refreshes independently.
 The status item is text-only and appends the weekly quota remaining, for example
 `$9.99 | 31%` or `221.6M | 31%`.
+Large API-equivalent spend uses compact notation such as `$1.2K` or `$1.3M` so
+the selected range's spend remains visible in the menu bar. If an unsupported
+model is present, the menu bar still shows the priced subtotal instead of hiding
+all known spend.
+The app keeps saved daily model rows visible while a first long-range raw-log
+backfill runs, then replaces them with the exact range report when that scan
+completes.
 JSON has a
 stable top-level schema with `date`, `timezone`, `range`, `start_at`, `end_at`,
 `generated_at`, `advisor`, `worker`, `combined`, `other`, `model_usage`, and
@@ -89,8 +104,8 @@ stable top-level schema with `date`, `timezone`, `range`, `start_at`, `end_at`,
 
 ## Data and performance semantics
 
-For today's report, the collector enumerates only the matching
-`~/.codex/sessions/YYYY/MM/DD` directory and its two neighboring session-day
+For today's report, the collector enumerates only the matching active Codex
+home's `sessions/YYYY/MM/DD` directory and its two neighboring session-day
 directories, allowing a rollout that crosses midnight to contribute its later
 events. It then keeps only files whose rollout date or modification date is the
 requested Berlin day. Top-level archived rollout files use the same date

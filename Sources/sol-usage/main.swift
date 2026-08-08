@@ -12,7 +12,7 @@ private let usageText = """
 Usage: codex-monitor [--json] [--watch] [--date YYYY-MM-DD]
 
   --json              Emit the stable JSON report schema.
-  --watch             Refresh every 30 seconds until interrupted.
+  --watch             Refresh every second until interrupted.
   --date YYYY-MM-DD   Show a saved daily snapshot (today is refreshed live).
 """
 
@@ -55,9 +55,8 @@ private func number(_ value: Int64) -> String {
 }
 
 private func money(_ value: Double?) -> String? {
-    guard let value else { return nil }
-    if value < 1 { return String(format: "$%.4f", value) }
-    return String(format: "$%.2f", value)
+    guard value != nil else { return nil }
+    return CompactMoneyFormatter.string(for: value)
 }
 
 private func printLane(_ name: String, _ totals: LaneTotals, includeCost: Bool) {
@@ -123,7 +122,7 @@ while true {
     }
 
     if !options.watch { break }
-    Thread.sleep(forTimeInterval: 30)
+    Thread.sleep(forTimeInterval: 1)
 }
 
 exit(0)

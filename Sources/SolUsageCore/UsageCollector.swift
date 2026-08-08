@@ -1,10 +1,11 @@
 import Foundation
 import CoreFoundation
 
-/// Reads the requested Europe/Berlin calendar day's local Codex rollout files,
+/// Reads the requested Europe/Berlin interval from local Codex rollout files,
 /// including adjacent storage days for cross-midnight rollouts. It is
-/// intentionally a simple, read-only collector: the menu app and CLI reparse
-/// today's eligible files on their 30-second refresh cadence.
+/// intentionally a simple, read-only collector. Parsed rollouts are cached by
+/// path, file size, modification time, and report scope so a live refresh only
+/// reparses files that changed.
 public final class UsageCollector: @unchecked Sendable {
     public static func defaultDataRoots(
         home: URL = FileManager.default.homeDirectoryForCurrentUser,
@@ -16,22 +17,41 @@ public final class UsageCollector: @unchecked Sendable {
         } else {
             codex = home.appendingPathComponent(".codex", isDirectory: true)
         }
+        // Some account/profile homes keep `sessions` and `archived_sessions`
+        // as symlinks. Resolve those roots before recursive enumeration;
+        // FileManager does not descend through a directory symlink when the
+        // starting URL itself is the link.
+        let sessions = codex
+            .appendingPathComponent("sessions", isDirectory: true)
+            .resolvingSymlinksInPath()
+        let archived = codex
+            .appendingPathComponent("archived_sessions", isDirectory: true)
+            .resolvingSymlinksInPath()
         return [
-            SolUsageDataRoot(url: codex.appendingPathComponent("sessions", isDirectory: true), recursive: true),
-            SolUsageDataRoot(url: codex.appendingPathComponent("archived_sessions", isDirectory: true), recursive: false)
+            SolUsageDataRoot(url: sessions, recursive: true),
+            SolUsageDataRoot(url: archived, recursive: false)
         ]
     }
 
     private let dataRoots: [SolUsageDataRoot]
+    private let fractionalDateFormatter: ISO8601DateFormatter
+    private let wholeSecondDateFormatter: ISO8601DateFormatter
 
     private static let tokenCountMarker = Data("\"token_count\"".utf8)
     private static let typeProbeLimit = 2 * 1024
     private static let linePrefixLimit = 64 * 1024
     private static let maximumCandidateLineBytes = 2 * 1024 * 1024
     private static let readChunkBytes = 64 * 1024
+    private static let maximumCachedRollouts = 4096
 
     public init(dataRoots: [SolUsageDataRoot] = UsageCollector.defaultDataRoots()) {
         self.dataRoots = dataRoots
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        self.fractionalDateFormatter = fractional
+        let wholeSecond = ISO8601DateFormatter()
+        wholeSecond.formatOptions = [.withInternetDateTime]
+        self.wholeSecondDateFormatter = wholeSecond
     }
 
     /// Reports today through the current instant, or one exact Berlin day
@@ -69,7 +89,7 @@ public final class UsageCollector: @unchecked Sendable {
     }
 
     public func report(for interval: UsageInterval, generatedAt: Date = Date()) -> UsageReport {
-        let files = discoverFiles(for: interval.dateLabel)
+        let files = discoverFiles(for: interval)
         var totalsByLane: [UsageLane: LaneTotals] = [
             .advisor: .zero,
             .worker: .zero,
@@ -78,7 +98,15 @@ public final class UsageCollector: @unchecked Sendable {
         var totalsByModel: [UsageModelKey: LaneTotals] = [:]
 
         for file in files {
-            let parsed = parseRollout(at: file.url, interval: interval)
+            let cacheIdentity = ParseCacheIdentity(
+                path: file.path,
+                scope: cacheScope(for: interval)
+            )
+            let parsed = cachedParse(
+                for: cacheIdentity,
+                file: file,
+                interval: interval
+            )
             for (lane, totals) in parsed.totals {
                 totalsByLane[lane, default: .zero].add(totals)
             }
@@ -144,6 +172,24 @@ public final class UsageCollector: @unchecked Sendable {
     private struct FileMetadata {
         let url: URL
         let path: String
+        let size: UInt64
+        let modificationDate: Date
+    }
+
+    private struct ParseCacheIdentity: Hashable {
+        let path: String
+        let scope: String
+    }
+
+    private struct ParseCacheEntry {
+        var size: UInt64
+        var modificationDate: Date
+        var parsed: ParsedRollout
+        var offset: UInt64
+        var previous = SnapshotCounters.empty
+        var activeModel: String?
+        var activeEffort: String?
+        var lineState = LineState()
     }
 
     private struct ParsedRollout {
@@ -152,6 +198,9 @@ public final class UsageCollector: @unchecked Sendable {
         var modelTotals: [UsageModelKey: LaneTotals] = [:]
         var contributingModels: Set<UsageModelKey> = []
     }
+
+    private let parseCacheLock = NSLock()
+    private var parseCache: [ParseCacheIdentity: ParseCacheEntry] = [:]
 
     private struct SnapshotCounters {
         var input: Int64?
@@ -350,40 +399,49 @@ public final class UsageCollector: @unchecked Sendable {
         }
     }
 
-    private func discoverFiles(for date: String) -> [FileMetadata] {
+    private func discoverFiles(for interval: UsageInterval) -> [FileMetadata] {
         var paths: Set<String> = []
         var result: [FileMetadata] = []
+        let dateFilter = storageDates(for: interval)
 
         for root in dataRoots {
             let rootName = root.url.lastPathComponent.lowercased()
             let urls: [URL]
-            let dateScoped: Bool
+            let bypassDateFilter: Bool
 
             if root.url.pathExtension.lowercased() == "jsonl" {
                 urls = [root.url]
-                dateScoped = true
+                bypassDateFilter = true
             } else if rootName == "sessions" {
                 // A rollout is stored under the day it started. If it crosses
                 // midnight, later token snapshots remain in that same folder,
-                // so inspect only the neighboring storage days and filter by
-                // the requested Berlin day below.
-                urls = sessionDayDirectories(for: date, root: root.url)
-                    .flatMap { dayDirectory in
-                        let enumerator = FileManager.default.enumerator(
-                            at: dayDirectory,
-                            includingPropertiesForKeys: nil,
-                            options: [.skipsPackageDescendants]
-                        )
-                        return enumerator?.compactMap { $0 as? URL } ?? []
-                    }
-                dateScoped = false
+                // so include one neighboring storage day on each side.
+                if dateFilter == nil {
+                    let enumerator = FileManager.default.enumerator(
+                        at: root.url,
+                        includingPropertiesForKeys: nil,
+                        options: [.skipsPackageDescendants]
+                    )
+                    urls = enumerator?.compactMap { $0 as? URL } ?? []
+                } else {
+                    urls = sessionDayDirectories(for: interval, root: root.url)
+                        .flatMap { dayDirectory in
+                            let enumerator = FileManager.default.enumerator(
+                                at: dayDirectory,
+                                includingPropertiesForKeys: nil,
+                                options: [.skipsPackageDescendants]
+                            )
+                            return enumerator?.compactMap { $0 as? URL } ?? []
+                        }
+                }
+                bypassDateFilter = false
             } else if rootName == "archived_sessions" {
                 urls = (try? FileManager.default.contentsOfDirectory(
                     at: root.url,
                     includingPropertiesForKeys: nil,
                     options: [.skipsPackageDescendants]
                 )) ?? []
-                dateScoped = false
+                bypassDateFilter = false
             } else if root.recursive {
                 let enumerator = FileManager.default.enumerator(
                     at: root.url,
@@ -391,20 +449,20 @@ public final class UsageCollector: @unchecked Sendable {
                     options: [.skipsPackageDescendants]
                 )
                 urls = enumerator?.compactMap { $0 as? URL } ?? []
-                dateScoped = false
+                bypassDateFilter = false
             } else {
                 urls = (try? FileManager.default.contentsOfDirectory(
                     at: root.url,
                     includingPropertiesForKeys: nil,
                     options: [.skipsPackageDescendants]
                 )) ?? []
-                dateScoped = false
+                bypassDateFilter = false
             }
 
             for url in urls where url.pathExtension.lowercased() == "jsonl" {
                 let standardized = url.standardizedFileURL
                 guard paths.insert(standardized.path).inserted,
-                      (dateScoped || matchesDate(standardized, date: date)),
+                      (bypassDateFilter || dateFilter == nil || matchesStorageDates(standardized, dates: dateFilter!)),
                       let metadata = metadata(for: standardized) else {
                     continue
                 }
@@ -415,12 +473,35 @@ public final class UsageCollector: @unchecked Sendable {
         return result.sorted { $0.path < $1.path }
     }
 
-    private func sessionDayDirectories(for date: String, root: URL) -> [URL] {
-        guard let start = SolUsageDates.startOfDay(for: date) else { return [] }
-        return (-1...1).compactMap { offset in
-            guard let day = SolUsageDates.calendar.date(byAdding: .day, value: offset, to: start) else {
-                return nil
+    private func storageDates(for interval: UsageInterval) -> Set<String>? {
+        guard interval.rangeIdentifier != "all-time" else { return nil }
+        let startDate = SolUsageDates.dateKey(for: interval.start)
+        let lastInstant = max(interval.start, interval.end.addingTimeInterval(-0.001))
+        let endDate = SolUsageDates.dateKey(for: lastInstant)
+        guard let start = SolUsageDates.startOfDay(for: startDate),
+              let end = SolUsageDates.startOfDay(for: endDate),
+              let first = SolUsageDates.calendar.date(byAdding: .day, value: -1, to: start),
+              let last = SolUsageDates.calendar.date(byAdding: .day, value: 1, to: end)
+        else {
+            return []
+        }
+
+        var dates: Set<String> = []
+        var day = first
+        while day <= last {
+            dates.insert(SolUsageDates.dateKey(for: day))
+            guard let next = SolUsageDates.calendar.date(byAdding: .day, value: 1, to: day) else {
+                break
             }
+            day = next
+        }
+        return dates
+    }
+
+    private func sessionDayDirectories(for interval: UsageInterval, root: URL) -> [URL] {
+        guard let dates = storageDates(for: interval) else { return [] }
+        return dates.sorted().compactMap { date in
+            guard let day = SolUsageDates.startOfDay(for: date) else { return nil }
             let components = SolUsageDates.calendar.dateComponents([.year, .month, .day], from: day)
             guard let year = components.year,
                   let month = components.month,
@@ -440,19 +521,82 @@ public final class UsageCollector: @unchecked Sendable {
               type == .typeRegular else {
             return nil
         }
-        return FileMetadata(url: url, path: url.path)
+        let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        let modificationDate = (attributes[.modificationDate] as? Date) ?? .distantPast
+        return FileMetadata(
+            url: url,
+            path: url.path,
+            size: size,
+            modificationDate: modificationDate
+        )
     }
 
-    private func matchesDate(_ url: URL, date: String) -> Bool {
+    private func cacheScope(for interval: UsageInterval) -> String {
+        // `today` advances its end time on every refresh. The file signature
+        // changes when new rollout data is appended, so keep the live scope
+        // stable and avoid throwing away the cache every second.
+        switch interval.rangeIdentifier {
+        case "today", "last-week", "last-month", "all-time":
+            return "\(interval.rangeIdentifier):\(SolUsageDates.dateKey(for: interval.start))"
+        default:
+            break
+        }
+        return "\(interval.rangeIdentifier):\(interval.start.timeIntervalSinceReferenceDate):\(interval.end.timeIntervalSinceReferenceDate)"
+    }
+
+    private func cachedParse(
+        for identity: ParseCacheIdentity,
+        file: FileMetadata,
+        interval: UsageInterval
+    ) -> ParsedRollout {
+        parseCacheLock.lock()
+        defer { parseCacheLock.unlock() }
+
+        var entry = parseCache[identity] ?? ParseCacheEntry(
+            size: 0,
+            modificationDate: .distantPast,
+            parsed: ParsedRollout(),
+            offset: 0
+        )
+
+        let fileWasReplaced = file.size < entry.offset ||
+            (file.size == entry.offset &&
+                file.modificationDate != entry.modificationDate &&
+                entry.offset > 0)
+        if fileWasReplaced {
+            entry = ParseCacheEntry(
+                size: 0,
+                modificationDate: .distantPast,
+                parsed: ParsedRollout(),
+                offset: 0
+            )
+        }
+
+        if file.size > entry.offset {
+            parseRollout(at: file.url, interval: interval, state: &entry)
+        }
+        entry.size = file.size
+        entry.modificationDate = file.modificationDate
+
+        if parseCache.count >= Self.maximumCachedRollouts,
+           parseCache[identity] == nil,
+           let first = parseCache.keys.first {
+            parseCache.removeValue(forKey: first)
+        }
+        parseCache[identity] = entry
+        return entry.parsed
+    }
+
+    private func matchesStorageDates(_ url: URL, dates: Set<String>) -> Bool {
         if let rolloutDate = rolloutStartDate(from: url),
-           SolUsageDates.dateKey(for: rolloutDate) == date {
+           dates.contains(SolUsageDates.dateKey(for: rolloutDate)) {
             return true
         }
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
               let modificationDate = attributes[.modificationDate] as? Date else {
             return false
         }
-        return SolUsageDates.dateKey(for: modificationDate) == date
+        return dates.contains(SolUsageDates.dateKey(for: modificationDate))
     }
 
     private func rolloutStartDate(from url: URL) -> Date? {
@@ -465,18 +609,22 @@ public final class UsageCollector: @unchecked Sendable {
         return SolUsageDates.startOfDay(for: String(name[marker.upperBound..<dateEnd]))
     }
 
-    private func parseRollout(at url: URL, interval: UsageInterval) -> ParsedRollout {
-        var contribution = ParsedRollout()
-        var previous = SnapshotCounters.empty
-        var activeModel: String?
-        var activeEffort: String?
-        var absoluteOffset: UInt64 = 0
-        var lineState = LineState()
-
+    private func parseRollout(
+        at url: URL,
+        interval: UsageInterval,
+        state: inout ParseCacheEntry
+    ) {
         guard let handle = try? FileHandle(forReadingFrom: url) else {
-            return contribution
+            return
         }
         defer { try? handle.close() }
+
+        do {
+            try handle.seek(toOffset: state.offset)
+        } catch {
+            return
+        }
+        var lineState = state.lineState
 
         while true {
             let chunk: Data
@@ -488,16 +636,15 @@ public final class UsageCollector: @unchecked Sendable {
             }
 
             for byte in chunk {
-                absoluteOffset += 1
                 if byte == 0x0A {
                     if let line = lineState.finish() {
-                        processLine(
+                        _ = processLine(
                             line,
                             interval: interval,
-                            previous: &previous,
-                            activeModel: &activeModel,
-                            activeEffort: &activeEffort,
-                            contribution: &contribution
+                            previous: &state.previous,
+                            activeModel: &state.activeModel,
+                            activeEffort: &state.activeEffort,
+                            contribution: &state.parsed
                         )
                     }
                     lineState.reset()
@@ -505,20 +652,22 @@ public final class UsageCollector: @unchecked Sendable {
                     lineState.append(byte)
                 }
             }
+            state.offset += UInt64(chunk.count)
         }
 
         if let line = lineState.finish(), lineState.hasBytes {
-            processLine(
+            if processLine(
                 line,
                 interval: interval,
-                previous: &previous,
-                activeModel: &activeModel,
-                activeEffort: &activeEffort,
-                contribution: &contribution
-            )
+                previous: &state.previous,
+                activeModel: &state.activeModel,
+                activeEffort: &state.activeEffort,
+                contribution: &state.parsed
+            ) {
+                lineState.reset()
+            }
         }
-        _ = absoluteOffset
-        return contribution
+        state.lineState = lineState
     }
 
     private func processLine(
@@ -528,9 +677,9 @@ public final class UsageCollector: @unchecked Sendable {
         activeModel: inout String?,
         activeEffort: inout String?,
         contribution: inout ParsedRollout
-    ) {
+    ) -> Bool {
         guard let record: RolloutRecord = autoreleasepool(invoking: { parseRecord(line) }) else {
-            return
+            return false
         }
 
         switch record.kind {
@@ -540,7 +689,7 @@ public final class UsageCollector: @unchecked Sendable {
         case let .tokenCount(snapshot):
             let delta = snapshot.delta(from: &previous)
             let metrics = delta.laneTotals
-            guard !metrics.isZero, interval.contains(record.timestamp) else { return }
+            guard !metrics.isZero, interval.contains(record.timestamp) else { return true }
             let lane = UsageLane.classify(model: activeModel, effort: activeEffort)
             contribution.totals[lane, default: .zero].add(metrics)
             let modelKey = UsageModelKey(
@@ -553,6 +702,7 @@ public final class UsageCollector: @unchecked Sendable {
                 contribution.contributingModels.insert(modelKey)
             }
         }
+        return true
     }
 
     private static func fastRecordKind(in data: Data) -> FastRecordKind {
@@ -691,7 +841,7 @@ public final class UsageCollector: @unchecked Sendable {
               let envelope = object as? [String: Any],
               let type = envelope["type"] as? String,
               let timestampString = envelope["timestamp"] as? String,
-              let timestamp = SolUsageDates.isoDate(from: timestampString) else {
+              let timestamp = parseDate(timestampString) else {
             return nil
         }
 
@@ -710,6 +860,10 @@ public final class UsageCollector: @unchecked Sendable {
             return nil
         }
         return RolloutRecord(timestamp: timestamp, kind: .tokenCount(SnapshotCounters(dictionary: usage)))
+    }
+
+    private func parseDate(_ value: String) -> Date? {
+        fractionalDateFormatter.date(from: value) ?? wholeSecondDateFormatter.date(from: value)
     }
 }
 

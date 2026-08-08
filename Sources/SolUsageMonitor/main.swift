@@ -26,6 +26,53 @@ private enum MonitorView: String, CaseIterable, Identifiable {
     }
 }
 
+private enum UsageRange: String, CaseIterable, Identifiable, Sendable {
+    case today
+    case lastWeek = "last-week"
+    case lastMonth = "last-month"
+    case allTime = "all-time"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .today: return "Today"
+        case .lastWeek: return "Last week"
+        case .lastMonth: return "Last month"
+        case .allTime: return "All time"
+        }
+    }
+
+    func interval(now: Date = Date()) -> UsageInterval {
+        let today = SolUsageDates.today(now: now)
+        let todayStart = SolUsageDates.startOfDay(for: today) ?? now
+        let start: Date
+        switch self {
+        case .today:
+            start = todayStart
+        case .lastWeek:
+            start = UsageRange.berlinCalendar.date(byAdding: .day, value: -6, to: todayStart) ?? todayStart
+        case .lastMonth:
+            start = UsageRange.berlinCalendar.date(byAdding: .day, value: -29, to: todayStart) ?? todayStart
+        case .allTime:
+            start = Date(timeIntervalSince1970: 0)
+        }
+        return UsageInterval(
+            rangeIdentifier: rawValue,
+            start: start,
+            end: now,
+            dateLabel: self == .today ? today : rawValue
+        )
+    }
+
+    private static let berlinCalendar: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: SolUsageDates.timezoneIdentifier)!
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        return calendar
+    }()
+}
+
 private enum RankingSort: String, CaseIterable, Identifiable {
     case totalTokens
     case apiCost
@@ -69,15 +116,15 @@ private struct UsagePopoverView: View {
     let savedReports: [UsageReport]
     let quota: CodexQuotaSnapshot?
     let quotaError: String?
-    let dates: [String]
-    let selectedDate: String
+    let selectedRange: UsageRange
+    let rangeRefreshing: Bool
     let selectedModel: String
     let selectedIntelligence: String
     let selectedView: MonitorView
     let rankingSort: RankingSort
     let statusMetric: UsageMetric
     let trendMetric: UsageMetric
-    let onDateChange: (String) -> Void
+    let onRangeChange: (UsageRange) -> Void
     let onModelChange: (String) -> Void
     let onIntelligenceChange: (String) -> Void
     let onViewChange: (MonitorView) -> Void
@@ -188,27 +235,23 @@ private struct UsagePopoverView: View {
                 Text("Codex Monitor")
                     .font(.headline.weight(.semibold))
                 Spacer()
-                Text(report.date == SolUsageDates.today() ? "Today" : report.date)
+                Text(rangeTitle)
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
 
             HStack(spacing: 8) {
-                Picker("Day", selection: Binding(
-                    get: { selectedDate },
-                    set: onDateChange
+                Picker("Range", selection: Binding(
+                    get: { selectedRange },
+                    set: onRangeChange
                 )) {
-                    ForEach(dates, id: \.self) { date in
-                        Text(dayLabel(date)).tag(date)
+                    ForEach(UsageRange.allCases) { range in
+                        Text(rangeLabel(range)).tag(range)
                     }
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
                 .frame(maxWidth: .infinity, alignment: .leading)
-
-                Text("saved")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
             }
 
             HStack(spacing: 8) {
@@ -225,9 +268,14 @@ private struct UsagePopoverView: View {
             }
 
             HStack(spacing: 8) {
-                Text("Menu bar")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Menu bar")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("All observed usage")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
                 Spacer()
                 Picker("Menu bar metric", selection: Binding(
                     get: { statusMetric },
@@ -237,7 +285,7 @@ private struct UsagePopoverView: View {
                         Text(metric.title).tag(metric)
                     }
                 }
-                .pickerStyle(.menu)
+                .pickerStyle(.segmented)
                 .labelsHidden()
             }
 
@@ -297,15 +345,15 @@ private struct UsagePopoverView: View {
 
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(hasSpecificSelection ? "Selected total" : "Combined")
+                                Text(hasSpecificSelection ? "Selected total" : "Observed total")
                                     .font(.headline)
-                                Text("API-equivalent estimate")
+                                Text(hasSpecificSelection ? "API-equivalent estimate" : "All observed usage")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
                             VStack(alignment: .trailing, spacing: 2) {
-                                let totals = hasSpecificSelection ? selectedTotals : report.combined
+                                let totals = hasSpecificSelection ? selectedTotals : report.observed
                                 Text(totals.compactTokenCount)
                                     .font(.headline.monospacedDigit())
                                 Text(money(totals.apiEquivalentCostUSD))
@@ -341,7 +389,9 @@ private struct UsagePopoverView: View {
             // instead of forcing the panel back to a fixed SwiftUI height.
             .frame(maxHeight: .infinity, alignment: .top)
 
-            Text("Updated \(SolUsageDates.displayTimestamp(report.generatedAt))")
+            Text(rangeRefreshing
+                ? "Updating \(selectedRange.title)…"
+                : "Updated \(SolUsageDates.displayTimestamp(report.generatedAt))")
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
             Text("Estimate is not Codex subscription billing.")
@@ -376,10 +426,16 @@ private struct UsagePopoverView: View {
         }
     }
 
-    private func dayLabel(_ date: String) -> String {
-        date == SolUsageDates.today()
-            ? "Today · \(SolUsageDates.displayDate(date))"
-            : SolUsageDates.displayDate(date)
+    private func rangeLabel(_ range: UsageRange) -> String {
+        if range == .today {
+            let today = SolUsageDates.today()
+            return "Today · \(SolUsageDates.displayDate(today))"
+        }
+        return range.title
+    }
+
+    private var rangeTitle: String {
+        rangeRefreshing ? "\(rangeLabel(selectedRange)) · Updating…" : rangeLabel(selectedRange)
     }
 
     private func modelLabel(_ model: String) -> String {
@@ -392,9 +448,7 @@ private struct UsagePopoverView: View {
     }
 
     private func money(_ value: Double?) -> String {
-        guard let value else { return "—" }
-        if value < 1 { return String(format: "$%.4f", value) }
-        return String(format: "$%.2f", value)
+        CompactMoneyFormatter.string(for: value)
     }
 }
 
@@ -625,8 +679,7 @@ private struct CacheBreakdownView: View {
     }
 
     private func money(_ value: Double) -> String {
-        if value < 1 { return String(format: "$%.4f", value) }
-        return String(format: "$%.2f", value)
+        CompactMoneyFormatter.string(for: value)
     }
 }
 
@@ -649,7 +702,7 @@ private struct DailyTrendView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Daily trend")
                         .font(.headline)
-                    Text("Combined saved usage · \(orderedReports.count) day\(orderedReports.count == 1 ? "" : "s")")
+                    Text("Observed saved usage · \(orderedReports.count) day\(orderedReports.count == 1 ? "" : "s")")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -701,22 +754,20 @@ private struct DailyTrendView: View {
 
     private func metricValue(_ report: UsageReport) -> Double {
         switch metric {
-        case .totalTokens: return Double(report.combined.totalTokens)
-        case .apiCost: return report.combined.apiEquivalentCostUSD ?? 0
+        case .totalTokens: return Double(report.observed.totalTokens)
+        case .apiCost: return report.observedAPICostUSD ?? 0
         }
     }
 
     private func metricLabel(_ report: UsageReport) -> String {
         switch metric {
-        case .totalTokens: return CompactTokenFormatter.string(for: report.combined.totalTokens)
-        case .apiCost: return money(report.combined.apiEquivalentCostUSD)
+        case .totalTokens: return CompactTokenFormatter.string(for: report.observed.totalTokens)
+        case .apiCost: return money(report.observedAPICostUSD)
         }
     }
 
     private func money(_ value: Double?) -> String {
-        guard let value else { return "—" }
-        if value < 1 { return String(format: "$%.4f", value) }
-        return String(format: "$%.2f", value)
+        CompactMoneyFormatter.string(for: value)
     }
 }
 
@@ -847,9 +898,7 @@ private struct ModelRankingRow: View {
     }
 
     private func money(_ value: Double?) -> String {
-        guard let value else { return "—" }
-        if value < 1 { return String(format: "$%.4f", value) }
-        return String(format: "$%.2f", value)
+        CompactMoneyFormatter.string(for: value)
     }
 }
 
@@ -911,9 +960,7 @@ private struct UsageLaneCard: View {
     }
 
     private func money(_ value: Double?) -> String {
-        guard let value else { return "—" }
-        if value < 1 { return String(format: "$%.4f", value) }
-        return String(format: "$%.2f", value)
+        CompactMoneyFormatter.string(for: value)
     }
 }
 
@@ -928,15 +975,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private static let panelHeightDefaultsKey = "panelHeight"
     private static let panelSizeConfiguredKey = "panelSizeConfigured.v1"
 
-    private let collector: UsageCollector
+    private let liveCollector: UsageCollector
+    private let rangeCollector: UsageCollector
     private let historyStore: DailyHistoryStore
     private let quotaFetcher: CodexQuotaFetcher
     private let quotaStore: CodexQuotaStore
-    private let refreshQueue = DispatchQueue(
-        label: "com.pkheisig.codexmonitor.refresh",
+    private let liveRefreshQueue = DispatchQueue(
+        label: "com.pkheisig.codexmonitor.live-refresh",
+        qos: .userInitiated
+    )
+    private let rangeRefreshQueue = DispatchQueue(
+        label: "com.pkheisig.codexmonitor.range-refresh",
         qos: .utility
     )
-    private var timer: Timer?
+    private var usageTimer: Timer?
+    private var quotaTimer: Timer?
+    private var quotaRefreshTask: Task<Void, Never>?
+    private var liveRefreshInFlight = false
+    private var rangeRefreshInFlight = false
+    private var rangeRefreshGeneration = 0
+    private var lastRangeRefreshAt = Date.distantPast
     private var statusItem: NSStatusItem!
     private var panel: MonitorPanel!
     private var hostingController: NSHostingController<UsagePopoverView>!
@@ -946,10 +1004,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     @Published private(set) var report: UsageReport
     @Published private(set) var todayReport: UsageReport
     @Published private(set) var savedReports: [UsageReport]
-    @Published private(set) var availableDates: [String]
     @Published private(set) var quota: CodexQuotaSnapshot?
     @Published private(set) var quotaError: String?
-    @Published private(set) var selectedDate: String
+    @Published private(set) var selectedRange: UsageRange
+    @Published private(set) var rangeRefreshing = false
     @Published private(set) var selectedModel = allSelection
     @Published private(set) var selectedIntelligence = allSelection
     @Published private(set) var selectedView: MonitorView
@@ -963,6 +1021,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let history = DailyHistoryStore()
         let quotaStore = CodexQuotaStore()
         let localAccountID = CodexQuotaFetcher.localAccountID()
+        let savedRange = UsageRange(
+            rawValue: UserDefaults.standard.string(forKey: "selectedRange") ?? ""
+        ) ?? .today
         let start = SolUsageDates.startOfDay(for: date) ?? now
         let empty = UsageReport(
             date: date,
@@ -976,14 +1037,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             other: .zero
         )
         let initial = history.report(for: date) ?? empty
-        collector = UsageCollector()
+        liveCollector = UsageCollector()
+        rangeCollector = UsageCollector()
         historyStore = history
         quotaFetcher = CodexQuotaFetcher()
         self.quotaStore = quotaStore
-        report = initial
+        report = savedRange == .today ? initial : Self.emptyReport(for: savedRange, now: now)
         todayReport = initial
         savedReports = history.reports()
-        availableDates = history.dates()
         // Never show a cached account's limits before the active Codex auth
         // has been identified. This prevents a second account on the same Mac
         // from briefly seeing the previous account's quota.
@@ -995,7 +1056,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             return cached
         }
         quotaError = nil
-        selectedDate = date
+        selectedRange = savedRange
+        rangeRefreshing = savedRange != .today
         selectedView = MonitorView(
             rawValue: UserDefaults.standard.string(forKey: Self.selectedViewDefaultsKey) ?? ""
         ) ?? .ranking
@@ -1063,11 +1125,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         suppressPanelPersistence = false
         installOutsideClickMonitor()
 
-        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        usageTimer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.requestRefresh()
+                self?.requestLiveUsageRefresh()
+                self?.requestRangeRefresh()
+                self?.updateStatusItem()
             }
         }
+        RunLoop.main.add(usageTimer!, forMode: .common)
+        quotaTimer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.requestQuotaRefresh()
+            }
+        }
+        RunLoop.main.add(quotaTimer!, forMode: .common)
         requestRefresh()
     }
 
@@ -1095,90 +1166,219 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     private func requestRefresh() {
+        requestLiveUsageRefresh()
+        requestRangeRefresh(force: true)
+        requestQuotaRefresh()
+    }
+
+    private func requestLiveUsageRefresh() {
+        guard !liveRefreshInFlight else { return }
+        liveRefreshInFlight = true
         let now = Date()
-        let activeAccountID = CodexQuotaFetcher.localAccountID()
-        let collector = self.collector
+        let collector = self.liveCollector
         let history = self.historyStore
-        let quotaFetcher = self.quotaFetcher
-        let quotaStore = self.quotaStore
-        refreshQueue.async { [weak self] in
+        liveRefreshQueue.async { [weak self] in
             guard self != nil else { return }
             let next = collector.report(generatedAt: now)
             history.save(next)
             let reports = history.reports()
-            let dates = reports.map(\.date)
-            Task.detached(priority: .utility) { [weak self] in
-                var freshQuota: CodexQuotaSnapshot?
-                var quotaError: String?
-                do {
-                    freshQuota = try await quotaFetcher.fetch(now: now)
-                    if let freshQuota {
-                        quotaStore.save(freshQuota)
-                    }
-                } catch is CancellationError {
-                    return
-                } catch {
-                    quotaError = error.localizedDescription
-                }
-                await MainActor.run {
-                    self?.applyToday(
-                        next,
-                        savedDates: dates,
-                        savedReports: reports,
-                        quota: freshQuota,
-                        quotaError: quotaError,
-                        activeAccountID: activeAccountID)
-                }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.applyLiveUsage(next, savedReports: reports)
+                self.liveRefreshInFlight = false
             }
         }
     }
 
-    private func applyToday(
-        _ next: UsageReport,
-        savedDates: [String],
-        savedReports: [UsageReport],
-        quota: CodexQuotaSnapshot?,
+    private func requestRangeRefresh(force: Bool = false) {
+        guard selectedRange != .today else {
+            rangeRefreshing = false
+            return
+        }
+        let now = Date()
+        // Keep already-saved daily model rows visible while the first raw-log
+        // backfill for a long range is running. The exact collector result
+        // replaces this snapshot when the background scan completes.
+        if (report.rangeIdentifier != selectedRange.rawValue ||
+            (report.combined.isZero && report.other.isZero && report.modelUsage.isEmpty)),
+           let cached = cachedRangeReport(for: selectedRange, now: now) {
+            report = cached
+            normalizeSelections()
+            refreshPanel()
+            updateStatusItem()
+        }
+        guard force || now.timeIntervalSince(lastRangeRefreshAt) >= 3 else { return }
+        guard !rangeRefreshInFlight else { return }
+
+        rangeRefreshInFlight = true
+        rangeRefreshing = true
+        lastRangeRefreshAt = now
+        let requestedRange = selectedRange
+        let requestedInterval = requestedRange.interval(now: now)
+        let generation = rangeRefreshGeneration
+        let collector = self.rangeCollector
+        rangeRefreshQueue.async { [weak self] in
+            guard self != nil else { return }
+            let selectedReport = collector.report(for: requestedInterval, generatedAt: now)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.rangeRefreshInFlight = false
+                guard self.rangeRefreshGeneration == generation,
+                      self.selectedRange == requestedRange else {
+                    return
+                }
+                self.report = selectedReport
+                self.rangeRefreshing = false
+                self.normalizeSelections()
+                self.refreshPanel()
+                self.updateStatusItem()
+            }
+        }
+    }
+
+    private func requestQuotaRefresh() {
+        quotaRefreshTask?.cancel()
+        let now = Date()
+        let activeAccountID = CodexQuotaFetcher.localAccountID()
+        let quotaFetcher = self.quotaFetcher
+        let quotaStore = self.quotaStore
+        quotaRefreshTask = Task.detached(priority: .utility) { [weak self] in
+            var freshQuota: CodexQuotaSnapshot?
+            var quotaError: String?
+            do {
+                freshQuota = try await quotaFetcher.fetch(now: now)
+                if let freshQuota {
+                    quotaStore.save(freshQuota)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                quotaError = error.localizedDescription
+            }
+            await MainActor.run {
+                self?.applyQuota(
+                    freshQuota,
+                    quotaError: quotaError,
+                    activeAccountID: activeAccountID
+                )
+            }
+        }
+    }
+
+    private func applyLiveUsage(_ next: UsageReport, savedReports: [UsageReport]) {
+        todayReport = next
+        self.savedReports = normalizedReports(savedReports, including: next)
+        if selectedRange == .today {
+            report = next
+            normalizeSelections()
+        }
+        refreshPanel()
+        updateStatusItem()
+    }
+
+    private func applyQuota(
+        _ freshQuota: CodexQuotaSnapshot?,
         quotaError: String?,
         activeAccountID: String?)
     {
         // An account switch can happen while the monitor is running. Never
         // leave the previous account's cached limits visible while the new
         // session is offline or the first refresh is still in flight.
-        if let quota, let activeAccountID, quota.accountID == activeAccountID {
-            self.quota = quota
-        } else if activeAccountID == nil || self.quota?.accountID != activeAccountID {
-            self.quota = nil
+        if let freshQuota, let activeAccountID, freshQuota.accountID == activeAccountID {
+            quota = freshQuota
+        } else if activeAccountID == nil || quota?.accountID != activeAccountID {
+            quota = nil
         }
-        let oldToday = SolUsageDates.today()
-        let wasViewingToday = selectedDate == oldToday
         self.quotaError = quotaError
-        todayReport = next
-        self.savedReports = normalizedReports(savedReports, including: next)
-        availableDates = normalizedDates(savedDates, including: next.date)
-        if wasViewingToday {
-            selectedDate = next.date
-            report = next
+        refreshPanel()
+        updateStatusItem()
+    }
+
+    private func selectRange(_ range: UsageRange) {
+        selectedRange = range
+        rangeRefreshGeneration += 1
+        UserDefaults.standard.set(range.rawValue, forKey: "selectedRange")
+        if range == .today {
+            report = todayReport
+            rangeRefreshing = false
+        } else {
+            let now = Date()
+            report = cachedRangeReport(for: range, now: now) ?? Self.emptyReport(for: range, now: now)
+            rangeRefreshing = true
         }
+        lastRangeRefreshAt = .distantPast
+        requestRangeRefresh(force: true)
         normalizeSelections()
         refreshPanel()
         updateStatusItem()
     }
 
-    private func selectDate(_ date: String) {
-        guard availableDates.contains(date) else { return }
-        selectedDate = date
-        UserDefaults.standard.set(date, forKey: "selectedDate")
-
-        if date == SolUsageDates.today() {
-            report = todayReport
-            requestRefresh()
-        } else if let saved = historyStore.report(for: date) {
-            report = saved
-        } else {
-            return
+    private func cachedRangeReport(for range: UsageRange, now: Date) -> UsageReport? {
+        let interval = range.interval(now: now)
+        let dailyReports = savedReports.filter { report in
+            guard let dayStart = SolUsageDates.startOfDay(for: report.date) else { return false }
+            return dayStart >= interval.start && dayStart < interval.end
         }
-        normalizeSelections()
-        refreshPanel()
+        guard !dailyReports.isEmpty else { return nil }
+
+        var advisor = LaneTotals.zero
+        var worker = LaneTotals.zero
+        var other = LaneTotals.zero
+        var modelTotals: [UsageModelKey: LaneTotals] = [:]
+
+        for daily in dailyReports {
+            advisor.add(daily.advisor)
+            worker.add(daily.worker)
+            other.add(daily.other)
+
+            let entries: [ModelUsage]
+            if daily.modelUsage.isEmpty {
+                entries = [
+                    ModelUsage(
+                        key: UsageModelKey(model: "gpt-5.6-sol", intelligence: "high"),
+                        totals: daily.advisor
+                    ),
+                    ModelUsage(
+                        key: UsageModelKey(model: "gpt-5.6-luna", intelligence: "max"),
+                        totals: daily.worker
+                    )
+                ].filter { !$0.totals.isZero }
+            } else {
+                entries = daily.modelUsage
+            }
+            for entry in entries {
+                modelTotals[entry.key, default: .zero].add(entry.totals)
+            }
+        }
+
+        advisor.apiEquivalentCostUSD = SolUsagePricing.estimate(for: advisor, lane: .advisor)
+        worker.apiEquivalentCostUSD = SolUsagePricing.estimate(for: worker, lane: .worker)
+        other.apiEquivalentCostUSD = nil
+
+        var combined = LaneTotals.zero
+        combined.add(advisor)
+        combined.add(worker)
+
+        let modelUsage = modelTotals.keys.sorted {
+            $0.model == $1.model ? $0.intelligence < $1.intelligence : $0.model < $1.model
+        }.map { key -> ModelUsage in
+            var totals = modelTotals[key] ?? .zero
+            totals.apiEquivalentCostUSD = SolUsagePricing.estimate(for: totals, model: key.model)
+            return ModelUsage(key: key, totals: totals)
+        }
+
+        return UsageReport(
+            date: interval.dateLabel,
+            rangeIdentifier: interval.rangeIdentifier,
+            startAt: SolUsageDates.isoString(for: interval.start),
+            endAt: SolUsageDates.isoString(for: interval.end),
+            generatedAt: SolUsageDates.isoString(for: now),
+            advisor: advisor,
+            worker: worker,
+            combined: combined,
+            other: other,
+            modelUsage: modelUsage
+        )
     }
 
     private func selectModel(_ model: String) {
@@ -1229,23 +1429,49 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         }
     }
 
-    private func normalizedDates(_ dates: [String], including today: String) -> [String] {
-        Array(Set(dates + [today])).sorted(by: >)
-    }
-
     private func normalizedReports(_ reports: [UsageReport], including today: UsageReport) -> [UsageReport] {
         var byDate = Dictionary(uniqueKeysWithValues: reports.map { ($0.date, $0) })
         byDate[today.date] = today
         return byDate.values.sorted { $0.date < $1.date }
     }
 
+    private static func emptyReport(for range: UsageRange, now: Date) -> UsageReport {
+        let interval = range.interval(now: now)
+        return UsageReport(
+            date: interval.dateLabel,
+            rangeIdentifier: interval.rangeIdentifier,
+            startAt: SolUsageDates.isoString(for: interval.start),
+            endAt: SolUsageDates.isoString(for: interval.end),
+            generatedAt: SolUsageDates.isoString(for: now),
+            advisor: .zero,
+            worker: .zero,
+            combined: .zero,
+            other: .zero
+        )
+    }
+
+    private var statusReport: UsageReport {
+        if selectedRange == .today {
+            return report.observedAPICostUSD != nil ? report : todayReport
+        }
+        if let cached = cachedRangeReport(for: selectedRange, now: Date()) {
+            return cached
+        }
+        return report.observedAPICostUSD != nil ? report : todayReport
+    }
+
     fileprivate var statusLabel: String {
+        let displayReport = statusReport
         let usage: String
         switch statusMetric {
         case .totalTokens:
-            usage = todayReport.combined.compactTokenCount
+            usage = displayReport.observed.compactTokenCount
         case .apiCost:
-            usage = money(todayReport.combined.apiEquivalentCostUSD)
+            if let cost = displayReport.observedAPICostUSD {
+                usage = money(cost)
+            } else {
+                usage = "—"
+            }
         }
 
         let weeklyLimit = quota?.weekly.flatMap { window in
@@ -1256,9 +1482,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     private func money(_ value: Double?) -> String {
-        guard let value else { return "—" }
-        if value < 1 { return String(format: "$%.4f", value) }
-        return String(format: "$%.2f", value)
+        CompactMoneyFormatter.string(for: value)
     }
 
     fileprivate func makePopoverView() -> UsagePopoverView {
@@ -1267,15 +1491,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             savedReports: savedReports,
             quota: quota,
             quotaError: quotaError,
-            dates: availableDates,
-            selectedDate: selectedDate,
+            selectedRange: selectedRange,
+            rangeRefreshing: rangeRefreshing,
             selectedModel: selectedModel,
             selectedIntelligence: selectedIntelligence,
             selectedView: selectedView,
             rankingSort: rankingSort,
             statusMetric: statusMetric,
             trendMetric: trendMetric,
-            onDateChange: { [weak self] date in self?.selectDate(date) },
+            onRangeChange: { [weak self] range in self?.selectRange(range) },
             onModelChange: { [weak self] model in self?.selectModel(model) },
             onIntelligenceChange: { [weak self] intelligence in self?.selectIntelligence(intelligence) },
             onViewChange: { [weak self] view in self?.selectView(view) },
@@ -1297,8 +1521,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     private func updateStatusItem() {
         guard let button = statusItem?.button else { return }
-        button.title = statusLabel
-        button.setAccessibilityLabel("Codex Monitor: \(statusLabel)")
+        let label = statusLabel
+        button.title = label
+        button.setAccessibilityLabel("Codex Monitor: \(label)")
         button.appearsDisabled = false
     }
 
@@ -1405,7 +1630,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        timer?.invalidate()
+        usageTimer?.invalidate()
+        quotaTimer?.invalidate()
+        quotaRefreshTask?.cancel()
         if let outsideClickMonitor {
             NSEvent.removeMonitor(outsideClickMonitor)
         }
